@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { @apply h-full; }
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: rgb(2 6 23); }
+  ::-webkit-scrollbar-thumb { background: rgb(30 41 59); border-radius: 6px; border: 2px solid rgb(2 6 23); }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(51 65 85); }
+}
+
+@layer components {
+  .card { @apply bg-slate-900/60 backdrop-blur border border-slate-800 rounded-xl; }
+  .card-hover { @apply transition-all duration-200 hover:border-slate-700 hover:bg-slate-900/80; }
+  .btn { @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-brand-500 text-slate-950 hover:bg-brand-400 active:bg-brand-600; }
+  .btn-secondary { @apply btn bg-slate-800 text-slate-200 hover:bg-slate-700; }
+  .btn-danger { @apply btn bg-rose-600/90 text-white hover:bg-rose-500; }
+  .btn-ghost { @apply btn text-slate-300 hover:bg-slate-800/60; }
+  .input { @apply w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500 transition; }
+  .label { @apply block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider; }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium; }
+  .badge-success { @apply badge bg-brand-500/15 text-brand-300; }
+  .badge-warning { @apply badge bg-amber-500/15 text-amber-300; }
+  .badge-danger  { @apply badge bg-rose-500/15 text-rose-300; }
+  .badge-info    { @apply badge bg-sky-500/15 text-sky-300; }
+  .badge-neutral { @apply badge bg-slate-700/40 text-slate-300; }
+  .table-row { @apply border-b border-slate-800/60 hover:bg-slate-800/30 transition-colors; }
+  .skeleton { @apply bg-slate-800/60 rounded animate-pulse; }
+}

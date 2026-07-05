@@ -1,0 +1,7 @@
+{
+  "name": "edgeflow-demo-service",
+  "version": "1.0.0",
+  "description": "Tiny Express echo server used to test the EdgeFlow gateway",
+  "main": "server.js",
+  "dependencies": { "express": "^4.19.2" }
+}
