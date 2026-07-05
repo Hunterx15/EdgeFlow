@@ -9,11 +9,18 @@
 import axios from 'axios';
 import { toast } from '../utils/toast';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+const API_PREFIX = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+
+const API_BASE_URL = `${API_URL}${API_PREFIX}`;
 
 const api = axios.create({
-  baseURL: API_BASE_URL, withCredentials: true, timeout: 30000,
-  headers: { 'Content-Type': 'application/json' },
+  baseURL: API_BASE_URL,
+  withCredentials: true,
+  timeout: 30000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
 });
 
 api.interceptors.request.use((config) => {
