@@ -437,6 +437,11 @@ async function proxyMiddleware(req, res, next) {
       publicPath: routeLookupPath,
       originalQuery: req.url.split("?")[1] || "",
     });
+    console.log("Forwarding request:", {
+      method: req.method,
+      upstreamPath,
+      target: target.url,
+    });
     const upstreamUrl = new URL(target.url);
     const targetBaseUrl = `${upstreamUrl.protocol}//${upstreamUrl.host}`;
     pipelineStages.push({
