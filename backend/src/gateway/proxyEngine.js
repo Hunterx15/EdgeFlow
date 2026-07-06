@@ -232,9 +232,18 @@ async function proxyMiddleware(req, res, next) {
       routeLookupPath,
     });
     // Stage 1: route lookup
-    const s1 = await stage("Route Lookup", () =>
-      routeCache.match(req.method, routeLookupPath),
-    );
+    const s1 = await stage("Route Lookup", () => {
+      const result = routeCache.match(req.method, routeLookupPath);
+
+      console.log("===== ROUTE LOOKUP =====");
+      console.log({
+        method: req.method,
+        routeLookupPath,
+        result,
+      });
+
+      return result;
+    });
     pipelineStages.push(s1);
     if (!s1.ok || !s1.result) {
       return res.status(404).json({
