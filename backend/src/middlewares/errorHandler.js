@@ -6,8 +6,11 @@ const logger = require('../utils/logger');
 const { AppError, fail } = require('../utils/http');
 const config = require('../config');
 
-// Re-export errors for convenience
-module.exports = require('../utils/http');
+// NOTE: a previous version had `module.exports = require('../utils/http')`
+// followed by a second `module.exports = { errorHandler, notFound }`. The
+// first assignment was dead code — overwritten by the second. It has been
+// removed to avoid confusion. Consumers that need http helpers should import
+// them from `../utils/http` directly.
 
 function errorHandler(err, req, res, _next) {
   const requestId = req.requestId || 'unknown';

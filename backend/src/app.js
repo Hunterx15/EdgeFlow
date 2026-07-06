@@ -48,10 +48,15 @@ function createApp() {
       ],
     }),
   );
-  app.use(express.json({ limit: config.server.bodyLimit }));
-  app.use(
-    express.urlencoded({ extended: true, limit: config.server.bodyLimit }),
-  );
+
+  // BUG FIX (CRITICAL): previously express.json() was applied to ALL routes
+  // including /gateway/*. This CONSUMED the request body before the proxy
+  // middleware could forward it — http-proxy then sent an empty body to the
+  // upstream, causing POST/PUT/PATCH requests to hang until timeout.
+  //
+  // Fix: apply body parsing ONLY to the management API routes (/api/v1/*),
+  // NOT to the gateway proxy routes (/gateway/*). The proxy must receive
+  // the raw request stream so it can forward it intact to the upstream.
   app.use(cookieParser());
   app.use(compression({ threshold: 1024, level: 6 }));
 
@@ -81,7 +86,19 @@ function createApp() {
     logger.warn("app: swagger-ui not available", { error: err.message });
   }
 
-  app.use(config.server.apiPrefix, apiRoutes);
+  // Body parsing for the MANAGEMENT API only (not the gateway proxy).
+  // This must be mounted BEFORE apiRoutes so controllers see req.body.
+  const apiBodyParser = express.json({ limit: config.server.bodyLimit });
+  const apiUrlencoded = express.urlencoded({
+    extended: true,
+    limit: config.server.bodyLimit,
+  });
+
+  // Mount the management API with body parsing.
+  app.use(config.server.apiPrefix, apiUrlencoded, apiBodyParser, apiRoutes);
+
+  // Mount the gateway proxy WITHOUT body parsing — the proxy needs the
+  // raw request stream to forward to the upstream.
   app.use(config.server.gatewayPrefix, proxyMiddleware);
 
   app.use(notFound);

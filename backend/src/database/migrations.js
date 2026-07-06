@@ -137,11 +137,13 @@ const migrations = [
         BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
         $$ LANGUAGE plpgsql;
 
-        CREATE OR REPLACE FUNCTION gen_random_uuid() RETURNS UUID AS $$
-        BEGIN
-          RETURN encode(gen_random_bytes(16), 'hex')::uuid;
-        END;
-        $$ LANGUAGE plpgsql;
+        -- BUG FIX: do NOT redefine gen_random_uuid(). PostgreSQL 13+ ships
+        -- it natively, and older versions get it from the pgcrypto extension.
+        -- The previous custom definition tried to call gen_random_bytes()
+        -- which only exists in pgcrypto, so on PG 13+ (where gen_random_uuid
+        -- is native) this would either shadow the native function with a
+        -- broken one, or fail outright on PG <13 without pgcrypto enabled.
+        -- The native function is correct; we rely on it.
       `);
 
       // Add updated_at triggers

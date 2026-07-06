@@ -50,7 +50,7 @@ const HOP_BY_HOP_HEADERS = [
 const proxy = httpProxy.createProxyServer({
   proxyTimeout: config.gateway.requestTimeoutMs,
   timeout: config.gateway.requestTimeoutMs,
-  selfHandleResponse: true, //here
+  selfHandleResponse: true,
   followRedirects: false,
   changeOrigin: true,
   ws: false,
@@ -75,6 +75,7 @@ proxy.on("error", (err, _req, _res, target) => {
 // ──────────────────────────────────────────────────────────────────
 proxy.on("proxyRes", (proxyRes, req, res) => {
   const ctx = req._proxyContext;
+  if (process.env.DEBUG_PROXY) console.log("[proxy] proxyRes fired:", req.method, req.url, "status:", proxyRes.statusCode);
 
   // Safety fallback: if no context (shouldn't happen in normal flow),
   // just pipe the response through without caching.
@@ -116,6 +117,7 @@ proxy.on("proxyRes", (proxyRes, req, res) => {
       try {
         res.writeHead(status, responseHeaders);
         res.end(body);
+        if (process.env.DEBUG_PROXY) console.log("[proxy] response written to client, status:", status, "size:", body.length);
       } catch (e) {
         // Client may have disconnected — ignore write errors.
         logger.debug("proxy: res.write/end failed (client gone?)", {
@@ -205,18 +207,23 @@ async function proxyMiddleware(req, res, next) {
   req.pipelineStages = pipelineStages;
 
   const gatewayPrefix = config.server.gatewayPrefix;
-  console.log({
-    originalUrl: req.originalUrl,
-    url: req.url,
-    path: req.path,
-    baseUrl: req.baseUrl,
-  });
+  // Strip the gateway prefix to get the public path that routes are stored
+  // under. The route cache stores routes by their `public_path` column,
+  // which does NOT include the gateway prefix.
+  //
+  // BUG FIX (CRITICAL): Previously `routeLookupPath` was set to `fullPath`
+  // (with the `/gateway` prefix), so route lookups always missed and every
+  // proxied request returned 404 ROUTE_NOT_FOUND. Now we use the stripped
+  // `publicPath` for both lookup AND path rewriting.
   const fullPath = req.originalUrl.split("?")[0];
   let publicPath = fullPath.startsWith(gatewayPrefix)
     ? fullPath.slice(gatewayPrefix.length)
     : fullPath;
   if (!publicPath.startsWith("/")) publicPath = "/" + publicPath;
-  const routeLookupPath = fullPath;
+  const routeLookupPath = publicPath;
+  const queryString = req.originalUrl.includes("?")
+    ? req.originalUrl.split("?")[1]
+    : "";
 
   let route,
     service,
@@ -226,24 +233,11 @@ async function proxyMiddleware(req, res, next) {
   let lastErr = null;
 
   try {
-    console.log({
-      fullPath,
-      publicPath,
-      routeLookupPath,
-    });
     // Stage 1: route lookup
-    const s1 = await stage("Route Lookup", () => {
-      const result = routeCache.match(req.method, routeLookupPath);
-
-      console.log("===== ROUTE LOOKUP =====");
-      console.log({
-        method: req.method,
-        routeLookupPath,
-        result,
-      });
-
-      return result;
-    });
+    const s1 = await stage("Route Lookup", () =>
+      routeCache.match(req.method, routeLookupPath),
+    );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 Route Lookup:", s1.ok, s1.result?.public_path || s1.error);
     pipelineStages.push(s1);
     if (!s1.ok || !s1.result) {
       return res.status(404).json({
@@ -255,11 +249,13 @@ async function proxyMiddleware(req, res, next) {
       });
     }
     route = s1.result;
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 done, route:", route.public_path, "service_id:", route.service_id);
 
     // Stage 2: load service
     const s2 = await stage("Service Load", () =>
       servicesService.getById(route.service_id),
     );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 2 Service Load:", s2.ok, s2.result?.name || s2.error);
     pipelineStages.push(s2);
     if (!s2.ok || !s2.result || !s2.result.enabled) {
       return res.status(503).json({
@@ -278,7 +274,7 @@ async function proxyMiddleware(req, res, next) {
         apiKeysService.validate(req.headers["x-api-key"]),
       );
       pipelineStages.push(s3);
-      if (!s3.ok || !s3.result.valid) {
+      if (!s3.ok || !s3.result?.valid) {
         return res.status(401).json({
           success: false,
           error: {
@@ -288,6 +284,7 @@ async function proxyMiddleware(req, res, next) {
         });
       }
       apiKeyId = s3.result.apiKey.id;
+      // Per-API-key rate limit overrides the route's default.
       route.rate_limit_per_min = s3.result.apiKey.rate_limit_per_min;
     } else {
       pipelineStages.push({
@@ -300,6 +297,7 @@ async function proxyMiddleware(req, res, next) {
 
     // Stage 4: rate limit
     const identity = apiKeyId || req.ip || "anon";
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit starting, identity:", identity);
     const s4 = await stage("Rate Limit", () =>
       rateLimiter.check({
         identity,
@@ -307,10 +305,14 @@ async function proxyMiddleware(req, res, next) {
         limitPerMin: route.rate_limit_per_min,
       }),
     );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit:", s4.ok, s4.result?.allowed, s4.error);
     pipelineStages.push(s4);
     if (!s4.ok || !s4.result.allowed) {
       res.setHeader("X-RateLimit-Limit", s4.result?.minute.limit || 0);
-      res.setHeader("X-RateLimit-Remaining", s4.result?.minute.remaining || 0);
+      res.setHeader(
+        "X-RateLimit-Remaining",
+        s4.result?.minute.remaining || 0,
+      );
       res.setHeader("Retry-After", "60");
       return res.status(429).json({
         success: false,
@@ -329,9 +331,7 @@ async function proxyMiddleware(req, res, next) {
       cacheKey = cacheService.buildCacheKey({
         routeId: route.id,
         method: req.method,
-        originalUrl:
-          routeLookupPath +
-          (req.url.includes("?") ? "?" + req.url.split("?")[1] : ""),
+        originalUrl: routeLookupPath + (queryString ? "?" + queryString : ""),
       });
       const s5 = await stage("Cache Lookup", () => cacheService.get(cacheKey));
       pipelineStages.push(s5);
@@ -440,13 +440,14 @@ async function proxyMiddleware(req, res, next) {
       });
     }
 
-    // Stage 8: path rewrite
+    // Stage 8: path rewrite — uses the STRIPPED publicPath (without /gateway),
+    // so the route's public_path prefix can be correctly removed.
     const upstreamPath = pathRewriter.rewrite({
       route,
       publicPath: routeLookupPath,
-      originalQuery: req.url.split("?")[1] || "",
+      originalQuery: queryString,
     });
-    console.log("Forwarding request:", {
+    logger.debug("proxy: forwarding", {
       method: req.method,
       upstreamPath,
       target: target.url,
@@ -491,23 +492,43 @@ async function proxyMiddleware(req, res, next) {
       responseSent: false, // filled by proxyRes handler
     };
 
+    // Save the original url so we can restore it on each retry attempt
+    // (proxy.web may mutate req.url).
+    const originalUrl = upstreamPath;
+
     while (attempts < maxAttempts && !responseSent) {
       attempts += 1;
       try {
         await new Promise((resolve, reject) => {
-          req.url = upstreamPath;
+          // Restore req.url on every attempt — proxy.web reads it.
+          req.url = originalUrl;
 
-          // res.finish fires after the proxyRes handler calls res.end().
-          res.once("finish", () => {
+          // `finish` fires after the proxyRes handler calls res.end().
+          // Use `once` so the listener is removed automatically after firing
+          // (prevents the listener leak that occurred when retry happened
+          // without `finish` firing — the listener stayed bound on res).
+          const onFinish = () => {
             responseSent = true;
+            cleanup();
             resolve();
-          });
-          res.once("error", (err) => reject(err));
+          };
+          const onError = (err) => {
+            cleanup();
+            reject(err);
+          };
+          const cleanup = () => {
+            res.removeListener("finish", onFinish);
+            res.removeListener("error", onError);
+          };
+          res.once("finish", onFinish);
+          res.once("error", onError);
 
           proxy.web(req, res, { target: targetBaseUrl }, (err) => {
+            if (process.env.DEBUG_PROXY) console.log("[proxy] proxy.web callback fired, err:", err?.message);
             if (err) {
               // Connection-level error (before any response was received).
               // This is the ONLY path that triggers retry.
+              cleanup();
               logger.warn("proxy: forward failed", {
                 error: err.message,
                 target: target.url,
@@ -516,11 +537,13 @@ async function proxyMiddleware(req, res, next) {
               circuitBreaker.recordFailure(target.url);
               if (!res.headersSent) {
                 if (attempts < maxAttempts) {
+                  // Schedule retry — resolve so the while-loop continues.
                   setTimeout(() => resolve(), config.gateway.retryDelayMs);
                 } else {
                   reject(err);
                 }
               } else {
+                // Headers already sent — can't retry, response is in flight.
                 resolve();
               }
             }
@@ -536,8 +559,8 @@ async function proxyMiddleware(req, res, next) {
     // Read results from the proxyRes handler's context.
     const ctx = req._proxyContext;
     delete req._proxyContext;
-    const responseStatus = ctx.responseStatus;
-    const responseSize = ctx.responseSize;
+    const responseStatus = ctx?.responseStatus;
+    const responseSize = ctx?.responseSize || 0;
 
     const forwardDurationMs = Math.round(
       Number(process.hrtime.bigint() - forwardStart) / 1e6,

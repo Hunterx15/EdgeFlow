@@ -5,6 +5,14 @@
  * request needs a route lookup. We keep an in-memory cache keyed by
  * (method, publicPath) for exact matches and a prefix index for
  * wildcards. Invalidation is explicit after mutations.
+ *
+ * BUG FIX: previously `refresh()` was called inside `match()` when the
+ * cache was stale. If many requests arrived at once, multiple refresh()
+ * calls would race (the `warming` flag was set, but other callers still
+ * issued redundant DB queries because the `if (warming) return;` only
+ * skipped the body, not the await). We now properly deduplicate by
+ * tracking the in-flight refresh Promise and returning it for concurrent
+ * callers.
  */
 
 const routesService = require("../services/routesService");
@@ -13,58 +21,56 @@ const logger = require("../utils/logger");
 let exactRoutes = new Map();
 let wildcardRoutes = [];
 let lastRefreshedAt = 0;
-let warming = false;
+let inFlightRefresh = null;
 const REFRESH_INTERVAL_MS = 60_000;
 
 async function refresh() {
-  console.log("REFRESH() CALLED");
-  if (warming) return;
-  warming = true;
-  try {
-    const rows = await routesService.listAllEnabled();
-    const nextExact = new Map();
-    const nextWildcard = [];
-    for (const r of rows) {
-      if (r.public_path.endsWith("/*") || r.public_path.endsWith(":*")) {
-        nextWildcard.push({
-          method: r.method.toUpperCase(),
-          prefix: r.public_path.replace(/\/\*$/, ""),
-          route: r,
-        });
-      } else {
-        nextExact.set(`${r.method.toUpperCase()}:${r.public_path}`, r);
+  // Deduplicate concurrent refresh calls — they all share one Promise.
+  if (inFlightRefresh) return inFlightRefresh;
+  inFlightRefresh = (async () => {
+    try {
+      const rows = await routesService.listAllEnabled();
+      const nextExact = new Map();
+      const nextWildcard = [];
+      for (const r of rows) {
+        if (r.public_path.endsWith("/*") || r.public_path.endsWith(":*")) {
+          nextWildcard.push({
+            method: r.method.toUpperCase(),
+            prefix: r.public_path.replace(/\/\*$/, ""),
+            route: r,
+          });
+        } else {
+          nextExact.set(`${r.method.toUpperCase()}:${r.public_path}`, r);
+        }
       }
-    }
-    exactRoutes = nextExact;
-    wildcardRoutes = nextWildcard;
-
-    console.log("========== ROUTE CACHE ==========");
-
-    for (const w of nextWildcard) {
-      console.log({
-        method: w.method,
-        prefix: w.prefix,
-        public_path: w.route.public_path,
+      exactRoutes = nextExact;
+      wildcardRoutes = nextWildcard;
+      lastRefreshedAt = Date.now();
+      logger.debug("routeCache: refreshed", {
+        exact: nextExact.size,
+        wildcard: nextWildcard.length,
       });
+    } catch (err) {
+      logger.error("routeCache: refresh failed", { error: err.message });
+    } finally {
+      inFlightRefresh = null;
     }
-
-    console.log("================================");
-
-    lastRefreshedAt = Date.now();
-    logger.debug("routeCache: refreshed", {
-      exact: nextExact.size,
-      wildcard: nextWildcard.length,
-    });
-  } catch (err) {
-    logger.error("routeCache: refresh failed", { error: err.message });
-  } finally {
-    warming = false;
-  }
+  })();
+  return inFlightRefresh;
 }
 
 async function match(method, publicPath) {
-  console.log("MATCH() CALLED");
-  if (Date.now() - lastRefreshedAt > REFRESH_INTERVAL_MS) await refresh();
+  // Refresh in the background if stale, but don't block initial requests
+  // when we already have *something* in the cache. If the cache is empty
+  // (cold start), we DO await the refresh.
+  if (Date.now() - lastRefreshedAt > REFRESH_INTERVAL_MS) {
+    if (exactRoutes.size === 0 && wildcardRoutes.length === 0) {
+      await refresh();
+    } else {
+      // Fire-and-forget refresh — current request uses stale cache.
+      refresh().catch(() => {});
+    }
+  }
   const m = method.toUpperCase();
   const exact = exactRoutes.get(`${m}:${publicPath}`);
   if (exact) return exact;
@@ -86,7 +92,6 @@ function invalidate() {
   lastRefreshedAt = 0;
 }
 async function warm() {
-  console.log("WARM() CALLED");
   await refresh();
 }
 function size() {

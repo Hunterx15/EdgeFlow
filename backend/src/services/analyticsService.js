@@ -7,6 +7,18 @@
 
 const { queryOne, queryMany, queryRaw } = require("../database/pool");
 
+const logger = require("../utils/logger");
+
+// BUG FIX NOTE on avg_latency_ms:
+// The previous formula was
+//   (avg_latency_ms * total_requests + $5) / (total_requests + 1)
+// but `total_requests` had ALREADY been incremented by `+ 1` in the
+// same SET clause, so the denominator was `total_requests + 1` while
+// the numerator used the post-increment value too — yielding an
+// off-by-one weighted average. The correct running-average formula
+// uses the PRE-increment count for the numerator weight and the
+// POST-increment count for the denominator:
+//   (avg_latency_ms * (total_requests - 1) + $5) / total_requests
 async function record({ serviceId, statusCode, latencyMs, cacheHit }) {
   if (!serviceId) return;
   const bucketMinute = new Date();
@@ -23,7 +35,7 @@ async function record({ serviceId, statusCode, latencyMs, cacheHit }) {
     success_count = analytics.success_count + $3,
     error_count = analytics.error_count + $4,
     cache_hit_count = analytics.cache_hit_count + $7,
-    avg_latency_ms = (analytics.avg_latency_ms * analytics.total_requests + $5) / (analytics.total_requests + 1),
+    avg_latency_ms = (analytics.avg_latency_ms * (analytics.total_requests - 1) + $5) / analytics.total_requests,
     max_latency_ms = GREATEST(analytics.max_latency_ms, $6)`,
       [
         bucketMinute,
@@ -36,9 +48,9 @@ async function record({ serviceId, statusCode, latencyMs, cacheHit }) {
       ],
     );
   } catch (err) {
-    console.error("========== ANALYTICS ERROR ==========");
-    console.error(err);
-    console.error("=====================================");
+    // BUG FIX: use the structured logger instead of console.error with
+    // decorative banners that polluted production logs.
+    logger.warn("analytics: record failed", { error: err.message, serviceId });
   }
 }
 
