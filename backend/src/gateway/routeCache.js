@@ -17,6 +17,7 @@ let warming = false;
 const REFRESH_INTERVAL_MS = 60_000;
 
 async function refresh() {
+  console.log("REFRESH() CALLED");
   if (warming) return;
   warming = true;
   try {
@@ -62,6 +63,7 @@ async function refresh() {
 }
 
 async function match(method, publicPath) {
+  console.log("MATCH() CALLED");
   if (Date.now() - lastRefreshedAt > REFRESH_INTERVAL_MS) await refresh();
   const m = method.toUpperCase();
   const exact = exactRoutes.get(`${m}:${publicPath}`);
@@ -84,6 +86,7 @@ function invalidate() {
   lastRefreshedAt = 0;
 }
 async function warm() {
+  console.log("WARM() CALLED");
   await refresh();
 }
 function size() {
