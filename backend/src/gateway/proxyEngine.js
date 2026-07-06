@@ -211,7 +211,7 @@ async function proxyMiddleware(req, res, next) {
     path: req.path,
     baseUrl: req.baseUrl,
   });
-  const fullPath = req.path || req.url.split("?")[0];
+  const fullPath = req.originalUrl.split("?")[0];
   let publicPath = fullPath.startsWith(gatewayPrefix)
     ? fullPath.slice(gatewayPrefix.length)
     : fullPath;
