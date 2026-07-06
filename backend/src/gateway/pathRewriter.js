@@ -9,17 +9,32 @@
 
 function rewrite({ route, publicPath, originalQuery }) {
   let upstream = route.upstream_path || '/';
+
   if (route.strip_prefix) {
     const publicPrefix = route.public_path.replace(/\/\*$/, '');
+
     let suffix = publicPath.slice(publicPrefix.length);
-    if (!suffix.startsWith('/')) suffix = '/' + suffix;
-    if (upstream.endsWith('/') && suffix.startsWith('/')) upstream = upstream.slice(0, -1) + suffix;
-    else if (!upstream.endsWith('/') && !suffix.startsWith('/')) upstream = upstream + '/' + suffix;
-    else upstream = upstream + suffix;
+
+    // Only prepend "/" when suffix is non-empty.
+    if (suffix && !suffix.startsWith('/')) {
+      suffix = '/' + suffix;
+    }
+
+    if (suffix) {
+      if (upstream.endsWith('/') && suffix.startsWith('/')) {
+        upstream = upstream.slice(0, -1) + suffix;
+      } else if (!upstream.endsWith('/') && !suffix.startsWith('/')) {
+        upstream = upstream + '/' + suffix;
+      } else {
+        upstream = upstream + suffix;
+      }
+    }
   }
+
   if (originalQuery && originalQuery.length > 0) {
     upstream += (upstream.includes('?') ? '&' : '?') + originalQuery;
   }
+
   return upstream;
 }
 

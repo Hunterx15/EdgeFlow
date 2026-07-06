@@ -226,6 +226,11 @@ async function proxyMiddleware(req, res, next) {
   let lastErr = null;
 
   try {
+    console.log({
+      fullPath,
+      publicPath,
+      routeLookupPath,
+    });
     // Stage 1: route lookup
     const s1 = await stage("Route Lookup", () =>
       routeCache.match(req.method, routeLookupPath),
