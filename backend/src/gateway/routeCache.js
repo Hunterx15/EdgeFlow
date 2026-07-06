@@ -7,8 +7,8 @@
  * wildcards. Invalidation is explicit after mutations.
  */
 
-const routesService = require('../services/routesService');
-const logger = require('../utils/logger');
+const routesService = require("../services/routesService");
+const logger = require("../utils/logger");
 
 let exactRoutes = new Map();
 let wildcardRoutes = [];
@@ -24,18 +24,38 @@ async function refresh() {
     const nextExact = new Map();
     const nextWildcard = [];
     for (const r of rows) {
-      if (r.public_path.endsWith('/*') || r.public_path.endsWith(':*')) {
-        nextWildcard.push({ method: r.method.toUpperCase(), prefix: r.public_path.replace(/\/\*$/, ''), route: r });
+      if (r.public_path.endsWith("/*") || r.public_path.endsWith(":*")) {
+        nextWildcard.push({
+          method: r.method.toUpperCase(),
+          prefix: r.public_path.replace(/\/\*$/, ""),
+          route: r,
+        });
       } else {
         nextExact.set(`${r.method.toUpperCase()}:${r.public_path}`, r);
       }
     }
     exactRoutes = nextExact;
     wildcardRoutes = nextWildcard;
+
+    console.log("========== ROUTE CACHE ==========");
+
+    for (const w of nextWildcard) {
+      console.log({
+        method: w.method,
+        prefix: w.prefix,
+        public_path: w.route.public_path,
+      });
+    }
+
+    console.log("================================");
+
     lastRefreshedAt = Date.now();
-    logger.debug('routeCache: refreshed', { exact: nextExact.size, wildcard: nextWildcard.length });
+    logger.debug("routeCache: refreshed", {
+      exact: nextExact.size,
+      wildcard: nextWildcard.length,
+    });
   } catch (err) {
-    logger.error('routeCache: refresh failed', { error: err.message });
+    logger.error("routeCache: refresh failed", { error: err.message });
   } finally {
     warming = false;
   }
@@ -46,19 +66,29 @@ async function match(method, publicPath) {
   const m = method.toUpperCase();
   const exact = exactRoutes.get(`${m}:${publicPath}`);
   if (exact) return exact;
-  let best = null; let bestLen = -1;
+  let best = null;
+  let bestLen = -1;
   for (const w of wildcardRoutes) {
-    if (w.method !== m && w.method !== '*') continue;
-    if (publicPath.startsWith(w.prefix + '/') || publicPath === w.prefix) {
-      if (w.prefix.length > bestLen) { best = w.route; bestLen = w.prefix.length; }
+    if (w.method !== m && w.method !== "*") continue;
+    if (publicPath.startsWith(w.prefix + "/") || publicPath === w.prefix) {
+      if (w.prefix.length > bestLen) {
+        best = w.route;
+        bestLen = w.prefix.length;
+      }
     }
   }
   return best;
 }
 
-function invalidate() { lastRefreshedAt = 0; }
-async function warm() { await refresh(); }
-function size() { return exactRoutes.size + wildcardRoutes.length; }
+function invalidate() {
+  lastRefreshedAt = 0;
+}
+async function warm() {
+  await refresh();
+}
+function size() {
+  return exactRoutes.size + wildcardRoutes.length;
+}
 function snapshot() {
   return {
     exact: Array.from(exactRoutes.keys()),
