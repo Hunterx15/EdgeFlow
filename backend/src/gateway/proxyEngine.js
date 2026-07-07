@@ -75,14 +75,7 @@ proxy.on("error", (err, _req, _res, target) => {
 // ──────────────────────────────────────────────────────────────────
 proxy.on("proxyRes", (proxyRes, req, res) => {
   const ctx = req._proxyContext;
-  if (process.env.DEBUG_PROXY)
-    console.log(
-      "[proxy] proxyRes fired:",
-      req.method,
-      req.url,
-      "status:",
-      proxyRes.statusCode,
-    );
+  if (process.env.DEBUG_PROXY) console.log("[proxy] proxyRes fired:", req.method, req.url, "status:", proxyRes.statusCode);
 
   // Safety fallback: if no context (shouldn't happen in normal flow),
   // just pipe the response through without caching.
@@ -124,13 +117,7 @@ proxy.on("proxyRes", (proxyRes, req, res) => {
       try {
         res.writeHead(status, responseHeaders);
         res.end(body);
-        if (process.env.DEBUG_PROXY)
-          console.log(
-            "[proxy] response written to client, status:",
-            status,
-            "size:",
-            body.length,
-          );
+        if (process.env.DEBUG_PROXY) console.log("[proxy] response written to client, status:", status, "size:", body.length);
       } catch (e) {
         // Client may have disconnected — ignore write errors.
         logger.debug("proxy: res.write/end failed (client gone?)", {
@@ -250,12 +237,7 @@ async function proxyMiddleware(req, res, next) {
     const s1 = await stage("Route Lookup", () =>
       routeCache.match(req.method, routeLookupPath),
     );
-    if (process.env.DEBUG_PROXY)
-      console.log(
-        "[proxy] Stage 1 Route Lookup:",
-        s1.ok,
-        s1.result?.public_path || s1.error,
-      );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 Route Lookup:", s1.ok, s1.result?.public_path || s1.error);
     pipelineStages.push(s1);
     if (!s1.ok || !s1.result) {
       return res.status(404).json({
@@ -267,24 +249,13 @@ async function proxyMiddleware(req, res, next) {
       });
     }
     route = s1.result;
-    if (process.env.DEBUG_PROXY)
-      console.log(
-        "[proxy] Stage 1 done, route:",
-        route.public_path,
-        "service_id:",
-        route.service_id,
-      );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 done, route:", route.public_path, "service_id:", route.service_id);
 
     // Stage 2: load service
     const s2 = await stage("Service Load", () =>
       servicesService.getById(route.service_id),
     );
-    if (process.env.DEBUG_PROXY)
-      console.log(
-        "[proxy] Stage 2 Service Load:",
-        s2.ok,
-        s2.result?.name || s2.error,
-      );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 2 Service Load:", s2.ok, s2.result?.name || s2.error);
     pipelineStages.push(s2);
     if (!s2.ok || !s2.result || !s2.result.enabled) {
       return res.status(503).json({
@@ -326,8 +297,7 @@ async function proxyMiddleware(req, res, next) {
 
     // Stage 4: rate limit
     const identity = apiKeyId || req.ip || "anon";
-    if (process.env.DEBUG_PROXY)
-      console.log("[proxy] Stage 4 Rate Limit starting, identity:", identity);
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit starting, identity:", identity);
     const s4 = await stage("Rate Limit", () =>
       rateLimiter.check({
         identity,
@@ -335,17 +305,14 @@ async function proxyMiddleware(req, res, next) {
         limitPerMin: route.rate_limit_per_min,
       }),
     );
-    if (process.env.DEBUG_PROXY)
-      console.log(
-        "[proxy] Stage 4 Rate Limit:",
-        s4.ok,
-        s4.result?.allowed,
-        s4.error,
-      );
+    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit:", s4.ok, s4.result?.allowed, s4.error);
     pipelineStages.push(s4);
     if (!s4.ok || !s4.result.allowed) {
       res.setHeader("X-RateLimit-Limit", s4.result?.minute.limit || 0);
-      res.setHeader("X-RateLimit-Remaining", s4.result?.minute.remaining || 0);
+      res.setHeader(
+        "X-RateLimit-Remaining",
+        s4.result?.minute.remaining || 0,
+      );
       res.setHeader("Retry-After", "60");
       return res.status(429).json({
         success: false,
@@ -555,22 +522,9 @@ async function proxyMiddleware(req, res, next) {
           };
           res.once("finish", onFinish);
           res.once("error", onError);
-          
-          console.log("========== EDGEFLOW ==========");
-          console.log("URL:", req.originalUrl);
-          console.log("Method:", req.method);
-          console.log("Content-Type:", req.headers["content-type"]);
-          console.log("Content-Length:", req.headers["content-length"]);
-          console.log("Readable Length:", req.readableLength);
-          console.log("Headers:", req.headers);
-          console.log("==============================");
 
           proxy.web(req, res, { target: targetBaseUrl }, (err) => {
-            if (process.env.DEBUG_PROXY)
-              console.log(
-                "[proxy] proxy.web callback fired, err:",
-                err?.message,
-              );
+            if (process.env.DEBUG_PROXY) console.log("[proxy] proxy.web callback fired, err:", err?.message);
             if (err) {
               // Connection-level error (before any response was received).
               // This is the ONLY path that triggers retry.
