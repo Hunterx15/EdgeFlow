@@ -89,12 +89,15 @@ async function fullStatus() {
   let redisOpsPerSec = 0;
   try {
     const info = await redis.info();
-    console.log("========== REDIS INFO ==========");
-    console.log(info);
-    console.log("================================");
     const parsed = await parseRedisInfo(info);
-    redisMemoryUsed = parseInt(parsed.used_memory || "0", 10);
-    redisMemoryPeak = parseInt(parsed.used_memory_peak || "0", 10);
+    const isUpstash = !!parsed.upstash_version;
+
+    redisMemoryUsed = isUpstash
+      ? parseInt(parsed.total_data_size || "0", 10)
+      : parseInt(parsed.used_memory || "0", 10);
+    redisMemoryPeak = isUpstash
+      ? parseInt(parsed.total_data_size || "0", 10)
+      : parseInt(parsed.used_memory_peak || "0", 10);
     redisConnectedClients = parseInt(parsed.connected_clients || "0", 10);
     redisUptimeSec = parseInt(parsed.uptime_in_seconds || "0", 10);
     redisOpsPerSec = parseInt(parsed.instantaneous_ops_per_sec || "0", 10);
