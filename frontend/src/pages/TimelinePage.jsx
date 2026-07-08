@@ -33,7 +33,7 @@ const STAGE_LABELS = {
   Response: "Response",
 };
 
-function getStageLabel(stage, actual) {
+function getStageLabel(stage, actual, log) {
   if (stage.key === 'Cache Lookup') {
     if (actual?.result === 'skipped') {
       return 'Cache Skipped';
@@ -221,7 +221,7 @@ function TimelineEntry({ log }) {
                   : "bg-rose-950/60 text-rose-300",
               )}
             >
-              {getStageLabel({ key: stage.name }, stage)}
+              {getStageLabel({ key: stage.name }, stage,log)}
               {stage.durationMs > 0 && (
                 <span className="text-slate-600 ml-1">
                   {stage.durationMs}ms
