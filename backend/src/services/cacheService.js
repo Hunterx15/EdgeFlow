@@ -25,15 +25,23 @@ function buildCacheKey({ routeId, method, originalUrl, body = null }) {
 async function get(key) {
   try {
     const c = await redis.getClient();
+
+    const raw = await c.get(key);
+
     logger.info("CACHE GET", {
       key,
       hit: !!raw,
     });
-    const raw = await c.get(key);
+
     if (!raw) return null;
+
     return JSON.parse(raw);
   } catch (err) {
-    logger.warn("cache: get failed", { error: err.message, key });
+    logger.warn("cache: get failed", {
+      error: err.message,
+      key,
+    });
+
     return null;
   }
 }
