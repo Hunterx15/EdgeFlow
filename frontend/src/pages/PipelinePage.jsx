@@ -353,7 +353,7 @@ export default function PipelinePage() {
                       {skippedAfterCache && (
                         <div className="flex items-center gap-2 text-xs mt-1">
                           <span className="badge-neutral">
-                            Skipped (Cache Hit)
+                            Skipped (Served from Redis cache)
                           </span>
                         </div>
                       )}
