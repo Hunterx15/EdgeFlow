@@ -24,6 +24,7 @@ const routeCache = require('./gateway/routeCache');
 const healthScheduler = require('./services/healthScheduler');
 const circuitBreaker = require('./services/circuitBreaker');
 const authService = require('./services/authService');
+const servicesService = require('./services/servicesService');
 const { queryOne } = require('./database/pool');
 const { createApp } = require('./app');
 
@@ -36,6 +37,17 @@ async function boot() {
 
   await redis.getClient();
   logger.info('server: redis ready', { fallback: redis.isFallback() });
+
+  // ── Dependency Injection: wire up healthScheduler providers ──
+  //
+  // healthScheduler needs to load service data during health checks, but
+  // servicesService needs healthScheduler to schedule checks when services
+  // are created. To break this cycle, healthScheduler accepts injected
+  // provider functions (set at boot time) and subscribes to eventBus
+  // events instead of being called directly by servicesService.
+  healthScheduler.setServiceProvider((id) => servicesService.getById(id));
+  healthScheduler.setListProvider(() => servicesService.list({ enabledOnly: true }));
+  healthScheduler.setHeartbeatUpdater((id, status, map) => servicesService.updateHeartbeat(id, status, map));
 
   await circuitBreaker.loadPersistedState();
   circuitBreaker.configure(config.gateway.circuitBreaker);
@@ -64,8 +76,19 @@ async function boot() {
     shuttingDown = true;
     logger.info(`server: received ${signal}, shutting down gracefully`);
     healthScheduler.stopAll();
-    server.close(() => logger.info('server: http closed'));
-    try { await db.close(); await redis.close(); } catch (err) { logger.error('server: shutdown error', { error: err.message }); }
+    // Wait for in-flight requests to complete before closing DB/Redis.
+    // server.close() stops accepting new connections but waits for
+    // existing ones to finish (up to server.timeout).
+    await new Promise((resolve) => server.close(() => {
+      logger.info('server: http closed');
+      resolve();
+    }));
+    try {
+      await db.close();
+      await redis.close();
+    } catch (err) {
+      logger.error('server: shutdown error', { error: err.message });
+    }
     process.exit(0);
   };
 

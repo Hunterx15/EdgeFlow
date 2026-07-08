@@ -6,8 +6,6 @@
  *   Error:   { success: false, error: { code, message, details? } }
  */
 
-const config = require('../config');
-
 function ok(res, data, meta = {}, status = 200) {
   return res.status(status).json({ success: true, data, meta: meta || {} });
 }
@@ -72,15 +70,9 @@ class NotFoundError extends AppError {
 class ConflictError extends AppError {
   constructor(m = 'Conflict', d = null) { super('CONFLICT', m, { status: 409, details: d }); this.name = 'ConflictError'; }
 }
-class RateLimitError extends AppError {
-  constructor(m = 'Too many requests', d = null) { super('RATE_LIMITED', m, { status: 429, details: d }); this.name = 'RateLimitError'; }
-}
-class CircuitOpenError extends AppError {
-  constructor(m = 'Circuit breaker open', d = null) { super('CIRCUIT_OPEN', m, { status: 503, details: d }); this.name = 'CircuitOpenError'; }
-}
 
 module.exports = {
-  ok, created, noContent, fail, ERROR_CODES, paginate, pick, sleep, generateRequestId,
+  ok, created, fail, ERROR_CODES, paginate, pick, sleep, generateRequestId,
   AppError, ValidationError, UnauthorizedError, ForbiddenError, NotFoundError,
-  ConflictError, RateLimitError, CircuitOpenError,
+  ConflictError,
 };

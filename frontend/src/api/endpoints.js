@@ -59,6 +59,12 @@ export const analyticsApi = {
   perService: (windowMinutes = 60) => http.get('/analytics/per-service', { params: { windowMinutes } }),
   topRoutes: (windowMinutes = 60) => http.get('/analytics/top-routes', { params: { windowMinutes } }),
   statusBreakdown: (windowMinutes = 60) => http.get('/analytics/status-breakdown', { params: { windowMinutes } }),
+  // New endpoints
+  latencyPercentiles: (windowMinutes = 60) => http.get('/analytics/latency-percentiles', { params: { windowMinutes } }),
+  slowEndpoints: (windowMinutes = 1440, limit = 10) => http.get('/analytics/slow-endpoints', { params: { windowMinutes, limit } }),
+  methodDistribution: (windowMinutes = 1440) => http.get('/analytics/method-distribution', { params: { windowMinutes } }),
+  serviceDistribution: (windowMinutes = 1440) => http.get('/analytics/service-distribution', { params: { windowMinutes } }),
+  trafficHeatmap: (days = 7) => http.get('/analytics/traffic-heatmap', { params: { days } }),
 };
 
 export const monitoringApi = {
@@ -69,7 +75,7 @@ export const monitoringApi = {
   cacheFlush: () => http.post('/monitoring/cache/flush'),
   cacheInvalidate: (pattern) => http.post('/monitoring/cache/invalidate', { pattern }),
   circuitBreakers: () => http.get('/monitoring/circuit-breakers'),
-  resetCircuit: (upstreamUrl) => http.post(`/monitoring/circuit-breakers/${encodeURIComponent(upstreamUrl)}/reset`, {}),
+  resetCircuit: (upstreamUrl) => http.post('/monitoring/circuit-breakers/reset', { upstreamUrl }),
 };
 
 export const playgroundApi = {

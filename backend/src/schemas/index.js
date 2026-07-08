@@ -3,8 +3,8 @@
  */
 
 const {
-  isString, isOptionalString, isBoolean, isOptionalBoolean,
-  isInt, isOptionalInt, ensureRequired,
+  isString, isOptionalString, isOptionalBoolean,
+  isOptionalInt, ensureRequired,
 } = require('../middlewares/validate');
 const { ValidationError } = require('../utils/http');
 

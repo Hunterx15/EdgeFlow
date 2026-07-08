@@ -49,4 +49,56 @@ async function statusBreakdown(req, res, next) {
   catch (err) { next(err); }
 }
 
-module.exports = { overview, perMinute, perService, topRoutes, statusBreakdown };
+// ── New endpoints for enhanced analytics ──
+
+async function latencyPercentiles(req, res, next) {
+  try {
+    const windowMinutes = Math.min(1440, parseInt(req.query.windowMinutes, 10) || 60);
+    const data = await analyticsService.latencyPercentiles({
+      since: new Date(Date.now() - windowMinutes * 60 * 1000).toISOString(),
+    });
+    return ok(res, { window: { minutes: windowMinutes }, ...data });
+  } catch (err) { next(err); }
+}
+
+async function slowEndpoints(req, res, next) {
+  try {
+    const windowMinutes = Math.min(1440 * 7, parseInt(req.query.windowMinutes, 10) || 1440);
+    const limit = Math.min(50, parseInt(req.query.limit, 10) || 10);
+    const data = await analyticsService.slowEndpoints({
+      since: new Date(Date.now() - windowMinutes * 60 * 1000).toISOString(),
+      limit,
+    });
+    return ok(res, data);
+  } catch (err) { next(err); }
+}
+
+async function methodDistribution(req, res, next) {
+  try {
+    const windowMinutes = Math.min(1440, parseInt(req.query.windowMinutes, 10) || 1440);
+    const data = await analyticsService.methodDistribution({
+      since: new Date(Date.now() - windowMinutes * 60 * 1000).toISOString(),
+    });
+    return ok(res, data);
+  } catch (err) { next(err); }
+}
+
+async function serviceDistribution(req, res, next) {
+  try {
+    const windowMinutes = Math.min(1440, parseInt(req.query.windowMinutes, 10) || 1440);
+    const data = await analyticsService.serviceDistribution({
+      since: new Date(Date.now() - windowMinutes * 60 * 1000).toISOString(),
+    });
+    return ok(res, data);
+  } catch (err) { next(err); }
+}
+
+async function trafficHeatmap(req, res, next) {
+  try {
+    const days = Math.min(30, parseInt(req.query.days, 10) || 7);
+    const data = await analyticsService.trafficHeatmap({ days });
+    return ok(res, data);
+  } catch (err) { next(err); }
+}
+
+module.exports = { overview, perMinute, perService, topRoutes, statusBreakdown, latencyPercentiles, slowEndpoints, methodDistribution, serviceDistribution, trafficHeatmap };

@@ -8,7 +8,7 @@ const controller = require('../controllers/authController');
 const { asyncHandler } = require('../utils/asyncHandler');
 const { body } = require('../middlewares/validate');
 const { loginSchema, createUserSchema } = require('../schemas');
-const { requireAuth, requireRole } = require('../middlewares/auth');
+const { requireAuth } = require('../middlewares/auth');
 
 router.post('/login', body(loginSchema), asyncHandler(controller.login));
 router.post('/refresh', asyncHandler(controller.refresh));

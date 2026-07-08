@@ -70,4 +70,4 @@ EdgeFlow intentionally uses a simpler architecture than traditional gateways:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Why no repository layer?** For a single-process gateway with a limited number of entity types, the repository pattern adds indirection without adding testability or flexibility. Services use parameterized queries directly via the shared pg Pool. This is easier to reason about, has fewer files, and is simpler to explain in interviews.
+**Why no repository layer?** For a single-process gateway with a limited number of entity types, the repository pattern adds indirection without adding testability or flexibility. Services use parameterized queries directly via the shared pg Pool. This keeps the codebase lean, reduces file count, and maintains direct SQL visibility for performance tuning.

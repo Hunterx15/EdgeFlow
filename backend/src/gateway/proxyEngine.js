@@ -31,6 +31,7 @@ const apiKeysService = require("../services/apiKeysService");
 const analyticsService = require("../services/analyticsService");
 const config = require("../config");
 const logger = require("../utils/logger");
+const jwt = require("../utils/jwt");
 const { generateRequestId, sleep } = require("../utils/http");
 const { queryRaw } = require("../database/pool");
 
@@ -64,6 +65,96 @@ proxy.on("error", (err, _req, _res, target) => {
 });
 
 // ──────────────────────────────────────────────────────────────────
+// proxyReq handler — ensures the request body is correctly forwarded
+// to the upstream in ALL scenarios.
+//
+// http-proxy's default behavior is to pipe req's stream to the upstream
+// request: `(options.buffer || req).pipe(proxyReq)` (web-incoming.js:170).
+// This works when the stream is intact. But it FAILS in these scenarios:
+//
+//   1. A middleware (express.json, body-parser) has already consumed the
+//      stream — req.body is populated but the stream is drained, so the
+//      pipe sends 0 bytes. The upstream sees Content-Length but no body.
+//
+//   2. The incoming request has BOTH Content-Length AND Transfer-Encoding:
+//      chunked (which some reverse proxies send). Node's HTTP parser
+//      rejects this with "Transfer-Encoding can't be present with
+//      Content-Length" → 400.
+//
+//   3. The stream was partially consumed (e.g. by a debug logger that
+//      called req.read()) and is now in a flowing state where the pipe
+//      misses the initial chunks.
+//
+// This handler fixes ALL three scenarios:
+//   - If req.body exists (body parser consumed it), re-serialize and write
+//     it explicitly, then remove the Transfer-Encoding header so the
+//     upstream sees a clean Content-Length.
+//   - If both Content-Length and Transfer-Encoding are present, remove
+//     Transfer-Encoding (per RFC 7230 §3.3.3, Content-Length wins).
+//   - Otherwise, let http-proxy's default pipe handle it (stream intact).
+//
+// This is the same pattern used by http-proxy-middleware's fixRequestBody(),
+// adapted for our selfHandleResponse:true setup.
+// ──────────────────────────────────────────────────────────────────
+proxy.on("proxyReq", (proxyReq, req, res, options) => {
+  if (process.env.DEBUG_PROXY) {
+    logger.debug("[proxy] proxyReq event", {
+      method: req.method,
+      url: req.url,
+      contentType: proxyReq.getHeader("content-type"),
+      contentLength: proxyReq.getHeader("content-length"),
+      transferEncoding: proxyReq.getHeader("transfer-encoding"),
+      hasBody: !!req.body,
+      readableLength: req.readableLength,
+    });
+  }
+
+  // ── Fix 1: Remove Transfer-Encoding if Content-Length is present ──
+  // Per RFC 7230 §3.3.3, a request MUST NOT have both. If both are present,
+  // Node's HTTP parser on the upstream rejects it with a 400 parse error.
+  // Some reverse proxies (Render, Cloudflare, nginx misconfigs) add
+  // Transfer-Encoding: chunked while preserving Content-Length. We strip
+  // Transfer-Encoding so the upstream sees a clean Content-Length request.
+  const contentLength = proxyReq.getHeader("content-length");
+  const transferEncoding = proxyReq.getHeader("transfer-encoding");
+  if (contentLength && transferEncoding) {
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: removing transfer-encoding (content-length present)");
+    proxyReq.removeHeader("transfer-encoding");
+  }
+
+  // ── Fix 2: Re-serialize req.body if a body parser consumed the stream ──
+  // If express.json() or body-parser ran on this request (which happens
+  // when the management API's body parser is accidentally applied, or when
+  // a future middleware change adds body parsing to /gateway/*), req.body
+  // is populated but the stream is drained. http-proxy's pipe sends 0
+  // bytes. We detect this by checking req.readableLength === 0 AND req.body
+  // exists, then re-serialize and write the body explicitly.
+  if (req.body !== undefined && req.body !== null && req.readableLength === 0) {
+    const contentType = proxyReq.getHeader("content-type") || "";
+    let bodyData = null;
+
+    if (contentType.includes("application/json") || contentType.includes("+json")) {
+      bodyData = JSON.stringify(req.body);
+    } else if (contentType.includes("application/x-www-form-urlencoded")) {
+      bodyData = new URLSearchParams(req.body).toString();
+    } else if (contentType.includes("text/plain") && typeof req.body === "string") {
+      bodyData = req.body;
+    }
+
+    if (bodyData !== null) {
+      if (process.env.DEBUG_PROXY) logger.debug("proxy: re-serializing req.body", { bytes: bodyData.length });
+      proxyReq.setHeader("Content-Length", Buffer.byteLength(bodyData));
+      proxyReq.removeHeader("transfer-encoding");
+      proxyReq.write(bodyData);
+    }
+  }
+  // If req.body is undefined AND the stream is intact, http-proxy's default
+  // pipe (line 170 of web-incoming.js) handles the forwarding. No action
+  // needed — this is the normal case for /gateway/* routes where express.json()
+  // is NOT mounted.
+});
+
+// ──────────────────────────────────────────────────────────────────
 // proxyRes handler — captures upstream responses for caching.
 //
 // Fires for EVERY proxied request (cacheable or not) because
@@ -75,7 +166,7 @@ proxy.on("error", (err, _req, _res, target) => {
 // ──────────────────────────────────────────────────────────────────
 proxy.on("proxyRes", (proxyRes, req, res) => {
   const ctx = req._proxyContext;
-  if (process.env.DEBUG_PROXY) console.log("[proxy] proxyRes fired:", req.method, req.url, "status:", proxyRes.statusCode);
+  if (process.env.DEBUG_PROXY) logger.debug("proxy: proxyRes fired", { method: req.method, url: req.url, status: proxyRes.statusCode });
 
   // Safety fallback: if no context (shouldn't happen in normal flow),
   // just pipe the response through without caching.
@@ -117,7 +208,7 @@ proxy.on("proxyRes", (proxyRes, req, res) => {
       try {
         res.writeHead(status, responseHeaders);
         res.end(body);
-        if (process.env.DEBUG_PROXY) console.log("[proxy] response written to client, status:", status, "size:", body.length);
+        if (process.env.DEBUG_PROXY) logger.debug("proxy: response written", { status, size: body.length });
       } catch (e) {
         // Client may have disconnected — ignore write errors.
         logger.debug("proxy: res.write/end failed (client gone?)", {
@@ -232,12 +323,18 @@ async function proxyMiddleware(req, res, next) {
     cacheHit = false;
   let lastErr = null;
 
+  // Capture the public path NOW, before req.url is mutated to the upstream
+  // path. recordLog uses this to store the correct public_path in
+  // request_logs. Without this, the log would show the upstream path.
+  const logPublicPath = routeLookupPath;
+  req._logPublicPath = logPublicPath;
+
   try {
     // Stage 1: route lookup
     const s1 = await stage("Route Lookup", () =>
       routeCache.match(req.method, routeLookupPath),
     );
-    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 Route Lookup:", s1.ok, s1.result?.public_path || s1.error);
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 1 Route Lookup", { ok: s1.ok, path: s1.result?.public_path, error: s1.error });
     pipelineStages.push(s1);
     if (!s1.ok || !s1.result) {
       return res.status(404).json({
@@ -249,13 +346,13 @@ async function proxyMiddleware(req, res, next) {
       });
     }
     route = s1.result;
-    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 1 done, route:", route.public_path, "service_id:", route.service_id);
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 1 done", { path: route.public_path, serviceId: route.service_id });
 
     // Stage 2: load service
     const s2 = await stage("Service Load", () =>
       servicesService.getById(route.service_id),
     );
-    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 2 Service Load:", s2.ok, s2.result?.name || s2.error);
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 2 Service Load", { ok: s2.ok, name: s2.result?.name, error: s2.error });
     pipelineStages.push(s2);
     if (!s2.ok || !s2.result || !s2.result.enabled) {
       return res.status(503).json({
@@ -268,7 +365,7 @@ async function proxyMiddleware(req, res, next) {
     }
     service = s2.result;
 
-    // Stage 3: API key auth
+    // Stage 3: API key auth (if route requires it)
     if (route.api_key_required) {
       const s3 = await stage("API Key Auth", () =>
         apiKeysService.validate(req.headers["x-api-key"]),
@@ -295,9 +392,51 @@ async function proxyMiddleware(req, res, next) {
       });
     }
 
+    // Stage 3.5: JWT auth (if route.auth_required is true)
+    //
+    // SECURITY FIX: Previously, the `auth_required` column on routes was
+    // NEVER enforced — any client could call any non-API-key route through
+    // /gateway/*. Now, when auth_required is true, we validate the EdgeFlow
+    // dashboard JWT from the Authorization header. This is SEPARATE from
+    // the upstream service's own auth (e.g. XCode's cookie-based JWT) —
+    // it's a gateway-level access control.
+    //
+    // The Authorization header is then STRIPPED before forwarding to the
+    // upstream, so the dashboard JWT never leaks to the backend service.
+    if (route.auth_required) {
+      const s35 = await stage("JWT Auth", () => {
+        const authHeader = req.headers.authorization || "";
+        if (!authHeader.startsWith("Bearer ")) {
+          const err = new Error("Missing Bearer token");
+          err.code = "MISSING_TOKEN";
+          throw err;
+        }
+        const token = authHeader.slice(7).trim();
+        const decoded = jwt.verifyAccessToken(token);
+        return { userId: decoded.sub, email: decoded.email };
+      });
+      pipelineStages.push(s35);
+      if (!s35.ok) {
+        return res.status(401).json({
+          success: false,
+          error: {
+            code: "UNAUTHORIZED",
+            message: s35.error?.includes("expired") ? "Token expired" : "Invalid or missing token",
+          },
+        });
+      }
+    } else {
+      pipelineStages.push({
+        name: "JWT Auth",
+        ok: true,
+        durationMs: 0,
+        result: "skipped (auth_required=false)",
+      });
+    }
+
     // Stage 4: rate limit
     const identity = apiKeyId || req.ip || "anon";
-    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit starting, identity:", identity);
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 4 Rate Limit starting", { identity });
     const s4 = await stage("Rate Limit", () =>
       rateLimiter.check({
         identity,
@@ -305,7 +444,7 @@ async function proxyMiddleware(req, res, next) {
         limitPerMin: route.rate_limit_per_min,
       }),
     );
-    if (process.env.DEBUG_PROXY) console.log("[proxy] Stage 4 Rate Limit:", s4.ok, s4.result?.allowed, s4.error);
+    if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 4 Rate Limit", { ok: s4.ok, allowed: s4.result?.allowed, error: s4.error });
     pipelineStages.push(s4);
     if (!s4.ok || !s4.result.allowed) {
       res.setHeader("X-RateLimit-Limit", s4.result?.minute.limit || 0);
@@ -468,6 +607,19 @@ async function proxyMiddleware(req, res, next) {
     req.headers["x-edgeflow-upstream"] = target.url;
     req.headers["x-forwarded-host"] = req.headers.host || "";
     req.headers["x-forwarded-proto"] = req.protocol || "http";
+    // X-Forwarded-For: chain the client IP so the upstream sees the real
+    // caller (not the gateway's IP). Express's req.ip already accounts for
+    // trust proxy settings.
+    req.headers["x-forwarded-for"] = req.ip || "";
+
+    // SECURITY: Strip the EdgeFlow dashboard JWT so it doesn't leak to the
+    // upstream service. The dashboard JWT is for gateway-level auth only
+    // (Stage 3.5). The upstream has its own auth (e.g. XCode's cookie JWT).
+    // Forwarding the dashboard JWT would let the upstream impersonate the
+    // dashboard user on the gateway management API.
+    if (route.auth_required) {
+      delete req.headers.authorization;
+    }
 
     // Stage 9: forward via http-proxy with retry-once
     //
@@ -524,7 +676,7 @@ async function proxyMiddleware(req, res, next) {
           res.once("error", onError);
 
           proxy.web(req, res, { target: targetBaseUrl }, (err) => {
-            if (process.env.DEBUG_PROXY) console.log("[proxy] proxy.web callback fired, err:", err?.message);
+            if (process.env.DEBUG_PROXY) logger.debug("proxy: proxy.web callback", { error: err?.message });
             if (err) {
               // Connection-level error (before any response was received).
               // This is the ONLY path that triggers retry.
@@ -672,10 +824,13 @@ function recordLog(
   retryCount = 0,
   stages = [],
 ) {
+  // Use req._logPublicPath (captured before req.url was mutated to the
+  // upstream path). Falls back to req.path for safety.
+  const publicPath = req._logPublicPath || req.path || req.url.split("?")[0];
   const payload = {
     requestId: req.requestId,
     method: req.method,
-    publicPath: req.path || req.url.split("?")[0],
+    publicPath,
     serviceId: service?.id || null,
     routeId: route?.id || null,
     apiKeyId: apiKeyId || null,

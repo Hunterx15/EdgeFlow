@@ -28,16 +28,6 @@ function requireAuth(req, res, next) {
   }
 }
 
-function optionalAuth(req, _res, next) {
-  const token = extractToken(req);
-  if (!token) return next();
-  try {
-    const decoded = jwt.verifyAccessToken(token);
-    req.user = { id: decoded.sub, email: decoded.email, role: decoded.role };
-  } catch { /* ignore */ }
-  return next();
-}
-
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return fail(res, { ...ERROR_CODES.UNAUTHORIZED, message: 'Authentication required' });
@@ -48,4 +38,4 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { requireAuth, optionalAuth, requireRole };
+module.exports = { requireAuth, requireRole };

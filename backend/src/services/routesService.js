@@ -23,7 +23,7 @@
 
 const { queryOne, queryMany, queryRaw } = require('../database/pool');
 const { NotFoundError, ConflictError, ValidationError } = require('../utils/http');
-const servicesService = require('./servicesService');
+const eventBus = require('../utils/eventBus');
 const config = require('../config');
 
 const COLS = `id, service_id, method, public_path, upstream_path, strip_prefix,
@@ -79,7 +79,10 @@ async function create(input) {
   // gateway prefix is never persisted.
   input.publicPath = normalizePublicPath(input.publicPath);
   validatePaths(input.publicPath, input.upstreamPath);
-  const svc = await servicesService.getById(input.serviceId);
+  // Verify the service exists. We do a direct DB query instead of calling
+  // servicesService.getById() to avoid a service-to-service dependency
+  // (which would create a circular dependency via the event bus).
+  const svc = await queryOne('SELECT id, enabled FROM services WHERE id = $1', [input.serviceId]);
   if (!svc) throw new NotFoundError('Service');
   const existing = await queryOne('SELECT id FROM routes WHERE method = $1 AND public_path = $2', [input.method.toUpperCase(), input.publicPath]);
   if (existing) throw new ConflictError(`Route ${input.method} ${input.publicPath} already exists`);
@@ -91,7 +94,9 @@ async function create(input) {
       input.stripPrefix, input.authRequired, input.apiKeyRequired, input.rateLimitPerMin,
       input.cacheTtlSec, input.description, input.enabled]
   );
-  require('../gateway/routeCache').invalidate();
+  // Emit event instead of directly requiring routeCache (breaks cycle).
+  // routeCache subscribes to this event and calls invalidate().
+  eventBus.emit(eventBus.EVENTS.ROUTE_CREATED, r);
   return r;
 }
 
@@ -116,41 +121,22 @@ async function update(id, patch) {
   if (sets.length === 0) return existing;
   values.push(id);
   const updated = await queryOne(`UPDATE routes SET ${sets.join(', ')} WHERE id = $${i} RETURNING ${COLS}`, values);
-  require('../gateway/routeCache').invalidate();
+  eventBus.emit(eventBus.EVENTS.ROUTE_UPDATED, updated);
   return updated;
 }
 
 async function setEnabled(id, enabled) {
   const updated = await queryOne(`UPDATE routes SET enabled = $1 WHERE id = $2 RETURNING ${COLS}`, [enabled, id]);
   if (!updated) throw new NotFoundError('Route');
-  require('../gateway/routeCache').invalidate();
+  eventBus.emit(eventBus.EVENTS.ROUTE_TOGGLED, updated);
   return updated;
 }
 
 async function remove(id) {
   await getById(id);
   await queryRaw('DELETE FROM routes WHERE id = $1', [id]);
-  require('../gateway/routeCache').invalidate();
+  eventBus.emit(eventBus.EVENTS.ROUTE_DELETED, { id });
   return true;
-}
-
-async function findByPublicPath(method, publicPath) {
-  const exact = await queryOne(`SELECT ${COLS} FROM routes WHERE method = $1 AND public_path = $2 AND enabled = TRUE`,
-    [method.toUpperCase(), publicPath]);
-  if (exact) return exact;
-  // Wildcard match - longest prefix wins
-  const all = await queryMany(`SELECT ${COLS} FROM routes WHERE enabled = TRUE AND (method = $1 OR method = '*')`,
-    [method.toUpperCase()]);
-  let best = null; let bestLen = -1;
-  for (const r of all) {
-    if (r.public_path.endsWith('/*') || r.public_path.endsWith(':*')) {
-      const prefix = r.public_path.replace(/\/\*$/, '');
-      if (publicPath.startsWith(prefix + '/') || publicPath === prefix) {
-        if (prefix.length > bestLen) { best = r; bestLen = prefix.length; }
-      }
-    }
-  }
-  return best;
 }
 
 async function listAllEnabled() {
@@ -167,4 +153,4 @@ function validatePaths(publicPath, upstreamPath) {
   if (!upstreamPath || !upstreamPath.startsWith('/')) throw new ValidationError('upstreamPath must start with /');
 }
 
-module.exports = { getById, list, create, update, setEnabled, remove, findByPublicPath, listAllEnabled, normalizePublicPath, METHODS };
+module.exports = { getById, list, create, update, setEnabled, remove, listAllEnabled, normalizePublicPath, METHODS };

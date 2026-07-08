@@ -1,421 +1,312 @@
-# 🌊 EdgeFlow
+# EdgeFlow
 
-> A modern, lightweight **API Gateway** built from scratch with Node.js, Express, PostgreSQL, Redis, and React 19.
-> Designed to be confidently explained for 20–30 minutes during an SDE interview.
+A high-performance API Gateway built on Node.js, Express, PostgreSQL, and Redis.
 
-EdgeFlow sits in front of multiple backend services and centralizes the cross-cutting concerns every production system eventually needs: **routing, authentication, rate limiting, caching, analytics, circuit breaking, and monitoring** — all behind a clean modern admin dashboard with a built-in API playground and request pipeline visualizer.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 
----
+## Features
 
-## 📑 Table of Contents
+- **Reverse Proxy** — Dynamic routing to multiple backend services with path rewriting and wildcard matching
+- **Authentication** — JWT access/refresh tokens with rotation, replay detection, and algorithm pinning
+- **API Keys** — Per-key rate limits, scopes, expiration, and usage tracking
+- **Rate Limiting** — Redis-backed fixed-window rate limiter with per-identity and per-route configuration
+- **Response Caching** — Redis response cache with per-route TTL and automatic invalidation
+- **Circuit Breaker** — Per-upstream state machine (CLOSED → OPEN → HALF_OPEN) with PostgreSQL persistence
+- **Load Balancing** — Smooth weighted round-robin (nginx algorithm) with health-aware target selection
+- **Health Checks** — Automatic upstream probing with configurable intervals and failure thresholds
+- **Analytics** — P50/P95/P99 latency, top routes, slow endpoints, traffic heatmap, method/status/service distribution
+- **Monitoring** — Real-time Redis, PostgreSQL, and Node.js runtime metrics (heap, CPU, event loop lag)
+- **Request Logs** — Per-request pipeline stages with full timing data
+- **API Playground** — Built-in Postman-like tester with per-session cookie jar, history, and cURL export
+- **Pipeline Visualizer** — Clickable per-stage latency and metadata for every proxied request
+- **Swagger UI** — Interactive API documentation at `/api/v1/docs`
 
-1. [Why an API Gateway?](#-why-an-api-gateway)
-2. [Folder Structure](#-folder-structure)
-3. [Architecture](#-architecture)
-4. [Reverse Proxy](#-reverse-proxy)
-5. [Redis](#-redis)
-6. [JWT Authentication](#-jwt-authentication)
-7. [Load Balancer](#-load-balancer)
-8. [Circuit Breaker](#-circuit-breaker)
-9. [Rate Limiting](#-rate-limiting)
-10. [Docker](#-docker)
-11. [Special Features](#-special-features)
-12. [Tech Stack](#-tech-stack)
-13. [Quick Start](#-quick-start)
-14. [API Reference](#-api-reference)
-15. [Future Improvements](#-future-improvements)
-16. [License](#-license)
+## Architecture
 
----
+```
+Client
+  │
+  ▼
+Express Gateway
+  ├── Helmet (security headers)
+  ├── CORS (origin whitelist)
+  ├── Compression
+  ├── Request ID + Response Logger
+  │
+  ├── /api/v1/*  →  Management API (Routes → Controllers → Services → DB)
+  │
+  └── /gateway/* →  Proxy Pipeline:
+        1. Route Lookup (in-memory cache)
+        2. Service Load (PostgreSQL)
+        3. API Key Auth (if required)
+        4. JWT Auth (if auth_required)
+        5. Rate Limit (Redis)
+        6. Cache Lookup (Redis, GET only)
+        7. Load Balancer (weighted round-robin)
+        8. Circuit Breaker (per-upstream state machine)
+        9. Path Rewrite (strip prefix)
+       10. Reverse Proxy (http-proxy → upstream)
+       11. Record Log (PostgreSQL, fire-and-forget)
+```
 
-## 🧠 Why an API Gateway?
+No circular dependencies. Services communicate via an in-process event bus. The health scheduler uses dependency injection. Verified with `madge --circular`.
 
-Without a gateway, every backend service has to reimplement the same concerns: auth, rate limiting, logging, metrics, CORS, TLS termination. With 5+ services this becomes unsustainable — duplication, drift, security holes.
+See [docs/Architecture.md](docs/Architecture.md) for the full architecture document and [docs/GatewayFlow.md](docs/GatewayFlow.md) for the complete request lifecycle.
 
-A gateway centralizes these concerns in **one place** so backend services can focus on business logic. Clients (browsers, mobile apps, partner systems) talk to a single stable entry point, and the gateway team can evolve backend topology — split a monolith into microservices, add replicas, change a URL — without breaking clients.
+## Tech Stack
 
-EdgeFlow implements the **minimal** set of concerns a real-world gateway needs:
+| Component | Technology |
+|-----------|------------|
+| Runtime | Node.js 20+ |
+| Framework | Express 4 |
+| Database | PostgreSQL 16 |
+| Cache / Rate Limiting | Redis 7 |
+| Proxy | http-proxy |
+| Auth | jsonwebtoken + bcrypt |
+| Frontend | React 18 + Vite |
+| Styling | Tailwind CSS |
+| Charts | Recharts |
+| Container | Docker (multi-stage, non-root) |
 
-| Concern | Implementation |
-| --- | --- |
-| Reverse proxy | `http-proxy` with retry-once + circuit breaker |
-| Dynamic routing | Routes table in PostgreSQL, in-memory cache |
-| Load balancing | Smooth weighted round-robin |
-| Auth | JWT (dashboard admins) + opaque API keys (consumers) |
-| Rate limiting | Sliding-window counter in Redis |
-| Response cache | Redis, per-route TTL |
-| Circuit breaker | CLOSED / OPEN / HALF_OPEN state machine |
-| Analytics | Per-minute rollups in PostgreSQL + pipeline_stages JSONB |
-| Health checks | Per-service scheduler with grace periods |
-| Observability | Structured logger + Swagger + monitoring endpoint + pipeline visualizer |
+## Quick Start
 
-This is **not** Kong, **not** Express Gateway — it is an original product, written from scratch using Express Gateway only as architectural inspiration.
+### Docker (recommended)
 
----
+```bash
+# Set required secrets
+export JWT_SECRET=$(openssl rand -hex 64)
+export JWT_REFRESH_SECRET=$(openssl rand -hex 64)
+export SEED_ADMIN_PASSWORD="YourSecurePassword123"
 
-## 📁 Folder Structure
+# Start the entire stack
+docker compose up --build
+```
+
+| Service | URL |
+|---------|-----|
+| Backend API | http://localhost:4000 |
+| Dashboard | http://localhost:8080 |
+| Swagger UI | http://localhost:4000/api/v1/docs |
+| PostgreSQL | localhost:5432 |
+| Redis | localhost:6379 |
+
+### Manual
+
+```bash
+# Backend
+cd backend
+cp .env.example .env   # edit with your values
+npm install
+npm start
+
+# Frontend
+cd frontend
+cp .env.example .env   # edit with your values
+npm install
+npm run dev
+```
+
+## Configuration
+
+All configuration is via environment variables. See [`.env.example`](backend/.env.example) for the full list.
+
+### Required for Production
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `JWT_SECRET` | Access token signing secret (min 32 chars) |
+| `JWT_REFRESH_SECRET` | Refresh token signing secret (min 32 chars) |
+| `SEED_ADMIN_PASSWORD` | Initial admin password (must not be default in production) |
+
+The gateway refuses to boot in production if any of these are missing or match insecure defaults.
+
+## API Overview
+
+### Management API (`/api/v1`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/login` | — | Login with email/password |
+| POST | `/auth/refresh` | Cookie | Refresh access token |
+| POST | `/auth/logout` | Bearer | Logout (revoke refresh token) |
+| GET | `/auth/me` | Bearer | Get current user |
+| GET/POST | `/services` | Bearer | List/create services |
+| GET/PUT/DELETE | `/services/:id` | Bearer | Manage a service |
+| GET/POST | `/routes` | Bearer | List/create routes |
+| GET/PUT/DELETE | `/routes/:id` | Bearer | Manage a route |
+| GET/POST | `/api-keys` | Bearer | List/issue API keys |
+| GET/PUT/DELETE | `/api-keys/:id` | Bearer | Manage an API key |
+| GET | `/logs` | Bearer | Request logs with filters |
+| GET | `/analytics/*` | Bearer | Analytics endpoints |
+| GET | `/monitoring/live` | — | Liveness probe |
+| GET | `/monitoring/ready` | — | Readiness probe |
+| POST | `/playground/send` | Bearer | Send a test request through the gateway |
+
+### Gateway Proxy (`/gateway`)
+
+All requests to `/gateway/<publicPath>` are matched against the routes table and proxied to the configured upstream service.
+
+```bash
+# Proxy to XCode backend
+curl http://localhost:4000/gateway/xcode/health
+
+# Authenticate through the gateway
+curl -X POST http://localhost:4000/gateway/xcode/user/login \
+  -H "Content-Type: application/json" \
+  -d '{"emailId":"test@test.com","password":"Password@123"}'
+```
+
+### API Examples
+
+```bash
+# Login to the management API
+TOKEN=$(curl -s -X POST http://localhost:4000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@edgeflow.dev","password":"Admin@12345"}' \
+  | jq -r '.data.accessToken')
+
+# Create a service
+curl -X POST http://localhost:4000/api/v1/services \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "XCode",
+    "basePath": "/xcode",
+    "upstreamTargets": [{"url": "https://x-code.onrender.com", "weight": 1}]
+  }'
+
+# Create a route
+curl -X POST http://localhost:4000/api/v1/routes \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "serviceId": "<service-id>",
+    "method": "GET",
+    "publicPath": "/xcode/health",
+    "upstreamPath": "/health",
+    "stripPrefix": true,
+    "authRequired": false
+  }'
+
+# Issue an API key
+curl -X POST http://localhost:4000/api/v1/api-keys \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Mobile App", "rateLimitPerMin": 1000}'
+```
+
+## Monitoring
+
+### Health Checks
+
+| Endpoint | Purpose | Status Codes |
+|----------|---------|-------------|
+| `GET /health` | Container liveness | 200 if process is running |
+| `GET /api/v1/monitoring/live` | Liveness with uptime | 200 |
+| `GET /api/v1/monitoring/ready` | Full subsystem readiness | 200 (ok/degraded) or 503 (down) |
+
+### Dashboard
+
+The dashboard at `/` provides:
+- **Overview** — Total requests, success rate, cache hit rate, P95 latency, live request graph
+- **Monitoring** — Redis (memory, connections, uptime, ops/sec), PostgreSQL (pool, latency), Node.js (heap, RSS, event loop lag, active handles)
+- **Analytics** — P50/P95/P99 latency, top routes, slow endpoints, traffic heatmap, status/method/service distribution
+- **Request Logs** — Searchable, filterable request log table with pipeline details
+- **Circuit Breakers** — Per-upstream state with manual reset capability
+- **API Playground** — Postman-like tester with per-session cookie jar, history, cURL export
+
+## Project Structure
 
 ```
 edgeflow/
-├── README.md                       ← you are here
-├── INTERVIEW.md                    ← 30 interview Q&A
-├── docker-compose.yml              ← full-stack orchestration
-├── .env.example                    ← root-level env template
-├── .dockerignore
-│
-├── backend/                        ← Node.js + Express gateway
-│   ├── package.json
-│   ├── .env.example
-│   └── src/
-│       ├── server.js               ← entry point (boots DB, Redis, scheduler)
-│       ├── app.js                  ← Express app factory
-│       ├── config/                 ← centralized env-driven config
-│       ├── database/               ← pg Pool, Redis client, migrations
-│       ├── services/               ← business logic + DB access (NO repositories)
-│       ├── middlewares/            ← auth, validate, errorHandler, logger
-│       ├── controllers/            ← HTTP req/res orchestration
-│       ├── routes/                 ← Express routers
-│       ├── gateway/                ← proxyEngine, routeCache, loadBalancer, pathRewriter
-│       ├── schemas/                ← validation schemas
-│       ├── utils/                  ← jwt, password, apiKey, logger, http, errors
-│       └── docs/                   ← swagger spec
-│
-├── frontend/                       ← React 19 + Vite dashboard
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── tailwind.config.js
-│   └── src/
-│       ├── main.jsx
-│       ├── App.jsx                 ← routing
-│       ├── api/                    ← axios client + endpoint definitions
-│       ├── context/                ← AuthContext
-│       ├── components/             ← ui/, layout/, charts/
-│       ├── layouts/                ← MainLayout (sidebar + topbar)
-│       └── pages/                  ← 12 pages (Dashboard, Services, Routes,
-│                                     API Keys, Playground, Pipeline, Timeline,
-│                                     DependencyGraph, Logs, Analytics,
-│                                     Monitoring, Settings)
-│
-├── docker/                         ← Dockerfiles + service configs
-│   ├── backend/Dockerfile
-│   ├── frontend/Dockerfile + nginx.conf
-│   ├── postgres/init.sql
-│   ├── redis/redis.conf
-│   └── demo-service/               ← mock backend for immediate testing
-│
-└── docs/
-    └── diagrams/                   ← architecture, ER, request-flow,
-                                      auth-flow, redis-flow, deployment-guide
+├── backend/
+│   ├── src/
+│   │   ├── config/          # Centralized configuration + validation
+│   │   ├── controllers/     # Request handlers (9 files)
+│   │   ├── database/        # PostgreSQL pool, Redis client, migrations
+│   │   ├── docs/            # OpenAPI/Swagger spec
+│   │   ├── gateway/         # Proxy engine, route cache, load balancer
+│   │   ├── middlewares/     # Auth, validation, logging, error handling
+│   │   ├── routes/          # Express route definitions (10 files)
+│   │   ├── schemas/         # Input validation schemas
+│   │   ├── services/        # Business logic (12 files)
+│   │   └── utils/           # Shared utilities (event bus, JWT, logger, etc.)
+│   └── tests/               # Test suites
+├── frontend/
+│   ├── src/
+│   │   ├── api/             # Axios client + endpoint definitions
+│   │   ├── components/      # Reusable UI components
+│   │   ├── context/         # React context (auth)
+│   │   ├── pages/           # Route-level page components
+│   │   └── utils/           # Formatting + toast utilities
+│   └── vite.config.js
+├── docker/                  # Dockerfiles + configs
+├── docker-compose.yml
+├── docs/                    # Architecture + technical documentation
+├── render.yaml              # Render deployment blueprint
+└── README.md
 ```
 
----
-
-## 🏗 Architecture
-
-EdgeFlow intentionally uses a **simpler architecture** than traditional gateways — no repository pattern:
-
-```
-Routes          → Express routers (HTTP endpoint definitions)
-Middlewares     → auth, validation, logging, rate limit, cache, error wrap
-Controllers     → HTTP req/res orchestration (no business logic)
-Services        → business logic + DB access (uses pg Pool directly)
-Database        → PostgreSQL + Redis
-```
-
-**Why no repository layer?** For a single-process gateway with a limited number of entity types, the repository pattern adds indirection without adding testability or flexibility. Services use parameterized queries directly via the shared pg Pool. This is easier to reason about, has fewer files, and is simpler to explain in interviews.
-
-See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for the full diagram.
-
----
-
-## 🔄 Reverse Proxy
-
-The proxy engine (`backend/src/gateway/proxyEngine.js`) is mounted at `/gateway/*` and uses `http-proxy` to forward requests. The engine runs **10 stages** per request, and each stage's duration is recorded in `request_logs.pipeline_stages` so the dashboard's Pipeline Visualizer page can render real timings:
-
-1. **Route Lookup** — in-memory cache (`routeCache.match()`)
-2. **Service Load** — fetch the service + its upstream targets from PG
-3. **API Key Auth** — if `api_key_required`, validate `X-API-Key`
-4. **Rate Limit** — sliding-window counter in Redis
-5. **Cache Lookup** — GET-only, per-route TTL
-6. **Load Balancer** — smooth weighted round-robin
-7. **Circuit Breaker** — skip open circuits
-8. **Path Rewrite** — `strip_prefix` + `upstream_path` template
-9. **Reverse Proxy** — `http-proxy.web()` with **retry-once** on failure
-10. **Response + Log** — fire-and-forget write to Postgres
-
-Forwarding headers set on every proxied request:
-- `X-EdgeFlow-Request-Id`
-- `X-EdgeFlow-Service-Id`
-- `X-EdgeFlow-Route-Id`
-- `X-EdgeFlow-Upstream`
-- `X-Forwarded-Host` / `X-Forwarded-Proto`
-
-See [`docs/diagrams/request-flow.md`](docs/diagrams/request-flow.md) for the full flow.
-
----
-
-## ⚡ Redis
-
-Redis is used for three things:
-
-1. **Response cache** — `cache:r:<routeId>:<method>:<url>` → JSON `{ status, headers, body }`, TTL per route.
-2. **Rate-limit counters** — `rl:<identity>:<routeId>:60:<bucket>` and `rl:<identity>:<routeId>:3600:<bucket>`, INCR + EXPIRE.
-3. **Circuit-breaker state** — mirrored to PostgreSQL (in-memory Map for hot reads).
-
-**What happens when Redis is down?** The `redis.getClient()` falls back to an in-memory `Map`-based shim so the gateway keeps serving traffic. This is logged loudly. In a single-instance deployment the gateway keeps working; in a multi-instance deployment cache hit rate drops to ~0% and rate-limit counters diverge between instances.
-
-See [`docs/diagrams/redis-flow.md`](docs/diagrams/redis-flow.md) for the full flow.
-
----
-
-## 🔐 JWT Authentication
-
-EdgeFlow has **two distinct auth surfaces**:
-
-### Dashboard admins → JWT
-
-- **Access token** (15 min, HS256, stateless) — sent as `Authorization: Bearer <token>`.
-- **Refresh token** (7 days, also JWT, tracked by `jti` claim) — sent as an httpOnly cookie.
-- On every refresh, we issue a new refresh token AND invalidate the previous one by updating `users.refresh_token_jti`. This detects token theft: if a stolen refresh token is replayed after the legitimate user has refreshed, the jti won't match → 401 + revoke all sessions.
-
-### API consumers → opaque API keys
-
-- Format: `ef_live_<12-byte-keyId>.<32-byte-secret>`.
-- The `keyId` (before the `.`) is safe to log; the `secret` is never stored — only its SHA-256 hash.
-- Verification: split on `.`, hash the secret, look up by `(key_id, key_hash)`. O(log n) via the unique index on `key_id`.
-- This mirrors how Stripe / GitHub personal access tokens work.
-
-Passwords are hashed with **bcrypt at cost factor 12**. On login, if the stored hash has a lower cost factor than the current config, we transparently re-hash on the fly.
-
-See [`docs/diagrams/auth-flow.md`](docs/diagrams/auth-flow.md) for the full flow.
-
----
-
-## ⚖️ Load Balancer
-
-**Smooth weighted round-robin** (the same algorithm nginx uses). Each target has a `weight` (configured) and a `currentWeight` (mutable):
-
-```
-on each call:
-  for each target t:  t.currentWeight += t.weight
-  pick the target with the highest currentWeight
-  subtract the total weight from the picked target's currentWeight
-```
-
-This produces a smooth distribution (e.g. weights 5:1 → every 6th request goes to the second target, never a burst of 5 in a row). Unhealthy targets are filtered out by the health scheduler before selection.
-
----
-
-## 🛡 Circuit Breaker
-
-Per-upstream-URL state machine with three states:
-
-```
-       failure_count >= threshold              elapsed > openStateMs
-       ┌──────────────────────────┐           ┌────────────────────────┐
-       ▼                          │           ▼                        │
-   ┌───────┐  failure  ┌────────┐  │   ┌──────────┐  success*threshold ┌───────┐
-   │CLOSED │ ────────▶ │ OPEN   │      │ HALF_OPEN│ ─────────────────▶ │CLOSED │
-   │       │           │ (wait) │      │ (probe)  │                    │       │
-   └───────┘           └────────┘      └──────────┘  failure           └───────┘
-       ▲                                  │       ┌─────────────────────┘
-       │                                  └──────▶ back to OPEN
-       └─ success resets failure_count
-```
-
-- **CLOSED** → traffic flows; failures increment a counter. At `failureThreshold` (5) → OPEN.
-- **OPEN** → fail fast with 503. After `openStateMs` (30s) → HALF_OPEN.
-- **HALF_OPEN** → allow up to `halfOpenMaxCalls` (3) probe requests. `successThreshold` (2) successes → CLOSED; any failure → OPEN again.
-
-State is kept in memory for hot-path reads AND mirrored to PostgreSQL so it survives restarts and is shared across replicas.
-
----
-
-## 🚦 Rate Limiting
-
-Per `(identity, route)` sliding-window approximation, implemented as two Redis counters:
-
-```
-minute bucket:  rl:<identity>:<routeId>:60:<floor(now/60)>    TTL 70s
-hour bucket:    rl:<identity>:<routeId>:3600:<floor(now/3600)> TTL 3700s
-```
-
-Single Redis PIPELINE per request:
-```
-INCR minute_key; EXPIRE minute_key 70
-INCR hour_key;   EXPIRE hour_key 3700
-```
-
-If `minute_count > limit_per_min` OR `hour_count > hour_limit` → 429 with `Retry-After: 60`.
-
-**Why a fixed-window approximation instead of a true sliding window?** A true sliding window needs a sorted set per identity (ZADD + ZREMRANGEBYSCORE + ZCARD per request) — ~3x more Redis work. The fixed-window approximation is "good enough" for most API gateway use cases and uses only 2 INCR + 2 EXPIRE per request — single round-trip via pipelining.
-
-**Fail-open policy:** if Redis is unreachable, we let the request through (logged loudly). The circuit breaker catches downstream issues.
-
----
-
-## 🐳 Docker
-
-The entire stack — Postgres, Redis, backend, frontend, plus a demo backend service — boots with one command:
+## Testing
 
 ```bash
-docker compose up --build
+cd backend
+npm install
+
+# Run test suites
+node tests/test-comprehensive.js       # Config, routing, JWT, API keys, cookies, load balancer
+node tests/test-routing-fix.js         # Route lookup, cache keys, wildcard matching
+node tests/test-playground-cookies.js  # Per-session cookie jar isolation
 ```
 
-| URL | What |
-| --- | --- |
-| http://localhost:8080 | Dashboard (React frontend via nginx) |
-| http://localhost:4000 | Backend API |
-| http://localhost:4000/api/v1/docs | Swagger UI |
-| http://localhost:4000/health | Liveness probe |
-| http://localhost:4000/gateway/* | Gateway proxy |
+133 tests across 3 suites. All pass.
 
-The `docker-compose.yml` defines health checks + `depends_on: condition: service_healthy` so the backend waits for Postgres + Redis before booting.
+## Deployment
 
-See [`docs/diagrams/deployment-guide.md`](docs/diagrams/deployment-guide.md) for production deployment notes.
+### Render (Backend)
 
----
+The repository includes a `render.yaml` blueprint. See [docs/Deployment.md](docs/Deployment.md) for step-by-step instructions.
 
-## ✨ Special Features
+### Vercel (Frontend)
 
-EdgeFlow includes 5 features that go beyond a standard CRUD dashboard:
+Import the repository, set root to `frontend`, set `VITE_API_URL` to the backend URL.
 
-### 1. API Playground (`/playground`)
+See [docs/Deployment.md](docs/Deployment.md) for the complete deployment guide.
 
-A built-in Postman-like API tester. Pick a method, enter a URL (any `/gateway/*` path), add headers / query params / body, hit Send. The request goes through the gateway so all middleware actually runs. Response panel shows status, headers, body, latency, and size.
+## Documentation
 
-### 2. Request Pipeline Visualizer (`/pipeline`)
+| Document | Description |
+|----------|-------------|
+| [docs/Architecture.md](docs/Architecture.md) | Layer separation, module dependencies, design decisions |
+| [docs/GatewayFlow.md](docs/GatewayFlow.md) | Complete 10-stage request lifecycle |
+| [docs/Security.md](docs/Security.md) | JWT, cookies, SSRF, input validation, environment validation |
+| [docs/Deployment.md](docs/Deployment.md) | Render, Vercel, Docker, health checks, migrations |
+| [docs/diagrams/](docs/diagrams/) | Architecture, ER diagram, Redis flow, request flow, auth flow |
 
-Animated page that shows the 10-stage request flow:
-```
-Client → Route Lookup → API Key Auth → Rate Limiter → Redis Cache
-→ Circuit Breaker → Load Balancer → Reverse Proxy → Microservice → Response
-```
+## Troubleshooting
 
-Pick any recent request from the sidebar, hit Play, and watch each stage light up with its real duration, status, and cache hit/miss.
+| Issue | Solution |
+|-------|----------|
+| `FATAL: Production config validation failed` | Set `JWT_SECRET`, `JWT_REFRESH_SECRET`, `SEED_ADMIN_PASSWORD` to non-default values |
+| `ROUTE_NOT_FOUND` on gateway requests | Ensure routes are stored WITHOUT the `/gateway` prefix (run migration 0002) |
+| POST body not forwarded | Ensure `express.json()` is NOT mounted on `/gateway/*` (only on `/api/v1/*`) |
+| Redis connection failed | Check `REDIS_URL` and `REDIS_ENABLED=true`. Gateway falls back to in-memory mode. |
+| `ECONNREFUSED` on upstream | Check that the upstream service is running and the URL is correct in the service config |
 
-### 3. Gateway Timeline (`/timeline`)
+## License
 
-Live vertical timeline of recent requests with their full pipeline chain. Each entry shows the chain:
-```
-12:10:32 → Incoming → Route Matched → Rate Limited → Cache Miss
-         → Service Selected → Forwarded → Response → 200 OK → 41ms
-```
+MIT © 2025 EdgeFlow
 
-Auto-refreshes every 10s.
+## Contributing
 
-### 4. Service Dependency Graph (`/dependency-graph`)
-
-Visualizes the gateway + every registered service as a tree:
-```
-EdgeFlow Gateway
-├── User Service          🟢 healthy
-├── Payment Service       🟡 degraded (half-open circuit)
-├── Inventory Service     🟢 healthy
-└── Notification Service  🔴 down
-```
-
-Each service node shows its upstream targets with per-target health dots.
-
-### 5. Live Metrics Dashboard (`/`)
-
-The homepage shows 10 live metrics:
-- Gateway Uptime
-- Active Requests
-- Requests/sec
-- P95 Latency
-- Error Rate
-- Cache Hit Ratio
-- Circuit Breaker State
-- Redis Memory Usage
-- PostgreSQL Connections
-- Total Services
-
-Updates every 5 seconds.
-
----
-
-## 🛠 Tech Stack
-
-| Layer | Technology |
-| --- | --- |
-| Frontend | React 19, Vite, Tailwind CSS, React Router, Axios, Recharts, React Hook Form |
-| Backend | Node.js 18+, Express 4 |
-| Database | PostgreSQL 16 |
-| Cache / counters | Redis 7 |
-| Auth | JWT (HS256, access + refresh), bcrypt, opaque API keys (SHA-256) |
-| Reverse proxy | `http-proxy` |
-| Containerization | Docker, docker-compose |
-| API docs | Swagger / OpenAPI 3 |
-
----
-
-## 🚀 Quick Start
-
-```bash
-git clone <this-repo>
-cd edgeflow
-docker compose up --build
-```
-
-Wait ~30 seconds, then open http://localhost:8080.
-
-**Sign in** with `admin@edgeflow.dev` / `Admin@12345`.
-
-**Test the proxy:**
-1. Register a service via the dashboard (Services → New Service).
-2. Register a route (Routes → New Route).
-3. Use the API Playground page to send a test request and watch the Pipeline Visualizer light up.
-
----
-
-## 📚 API Reference
-
-Interactive Swagger UI at **`/api/v1/docs`** once the backend is running.
-
-Quick reference:
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| POST | `/api/v1/auth/login` | Login |
-| POST | `/api/v1/auth/refresh` | Rotate access token |
-| POST | `/api/v1/auth/logout` | Logout |
-| GET | `/api/v1/auth/me` | Current user profile |
-| GET | `/api/v1/dashboard/overview` | Dashboard overview |
-| GET | `/api/v1/dashboard/live-metrics` | Live metrics (RPS, P95, active) |
-| GET | `/api/v1/services` | List services |
-| POST | `/api/v1/services` | Register service |
-| GET | `/api/v1/routes` | List routes |
-| POST | `/api/v1/routes` | Register route |
-| GET | `/api/v1/api-keys` | List API keys |
-| POST | `/api/v1/api-keys` | Issue API key (plaintext shown once) |
-| GET | `/api/v1/logs` | Paginated request logs |
-| GET | `/api/v1/logs/timeline` | Recent logs with pipeline stages |
-| GET | `/api/v1/logs/:id/pipeline` | Pipeline stages for a specific log |
-| GET | `/api/v1/analytics/per-minute` | Per-minute rollups |
-| GET | `/api/v1/monitoring/ready` | Full system readiness probe |
-| GET | `/api/v1/monitoring/dependency-graph` | Service dependency graph data |
-| GET | `/api/v1/monitoring/circuit-breakers` | Circuit breaker states |
-| POST | `/api/v1/monitoring/cache/flush` | Flush response cache |
-| POST | `/api/v1/playground/send` | Send a test request through the gateway |
-| ALL | `/gateway/*` | The proxy itself |
-
----
-
-## 🚧 Future Improvements
-
-- **WebSocket proxying** — `http-proxy` supports it; needs a separate upgrade handler.
-- **gRPC support** — currently HTTP-only.
-- **JWT blacklist** — for instant access-token revocation on logout / password change.
-- **Audit log** — separate from `request_logs`, records admin actions.
-- **Prometheus metrics** — `/metrics` endpoint with `http_requests_total`, `http_request_duration_seconds`, etc.
-- **OTLP tracing** — OpenTelemetry spans propagated to upstreams via `traceparent`.
-- **Multi-tenancy** — add `organization_id` to every table for SaaS use.
-- **Columnar log storage** — ship `request_logs` to ClickHouse after 24h.
-- **Per-instance rate-limit bypass** — let admin temporarily raise a key's limit without a DB write.
-
----
-
-## 📄 License
-
-MIT © 2025 EdgeFlow. Built for SDE interview preparation.
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/new-feature`)
+3. Commit changes (`git commit -am 'Add new feature'`)
+4. Push to the branch (`git push origin feature/new-feature`)
+5. Open a Pull Request

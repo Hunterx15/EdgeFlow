@@ -12,7 +12,13 @@
  */
 
 const { healthyTargetsOnly } = require('../utils/upstream');
+const eventBus = require('../utils/eventBus');
+
 const counters = new Map(); // serviceId -> { counter, currentWeights }
+
+// Clean up counters when a service is deleted — prevents memory leak
+// where deleted services' counter state persists forever.
+eventBus.on(eventBus.EVENTS.SERVICE_DELETED, ({ id }) => reset(id));
 
 function nextTarget(service) {
   if (!service || !Array.isArray(service.upstream_targets)) return null;
@@ -54,11 +60,10 @@ function weightedRoundRobin(serviceId, targets) {
 }
 
 function reset(serviceId) { counters.delete(serviceId); }
-function resetAll() { counters.clear(); }
 function snapshot() {
   const out = {};
   for (const [id, s] of counters) out[id] = { counter: s.counter };
   return out;
 }
 
-module.exports = { nextTarget, reset, resetAll, snapshot };
+module.exports = { nextTarget, reset, snapshot };

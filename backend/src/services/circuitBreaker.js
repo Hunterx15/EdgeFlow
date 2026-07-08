@@ -13,11 +13,26 @@
  *            Any failure -> OPEN again.
  */
 
-const { queryOne, queryRaw } = require('../database/pool');
+const { queryRaw, queryMany } = require('../database/pool');
 const logger = require('../utils/logger');
+const eventBus = require('../utils/eventBus');
 
 const cfg = { failureThreshold: 5, successThreshold: 2, openStateMs: 30000, halfOpenMaxCalls: 3 };
 const state = new Map();
+
+// Clean up circuit breaker state when a service is deleted — prevents
+// memory leak where deleted upstreams' breaker state persists forever.
+// The event payload includes the service's upstream_targets so we can
+// match breaker entries by URL.
+eventBus.on(eventBus.EVENTS.SERVICE_DELETED, ({ upstreamTargets }) => {
+  if (!Array.isArray(upstreamTargets)) return;
+  for (const t of upstreamTargets) {
+    if (t.url && state.has(t.url)) {
+      state.delete(t.url);
+      logger.debug('circuit: cleaned up state for deleted upstream', { upstreamUrl: t.url });
+    }
+  }
+});
 
 function get(upstreamUrl) {
   if (!state.has(upstreamUrl)) {
@@ -86,23 +101,6 @@ function recordFailure(upstreamUrl) {
   }
 }
 
-async function withBreaker(upstreamUrl, requestFn) {
-  const decision = allowRequest(upstreamUrl);
-  if (!decision.allowed) {
-    const err = new Error(`Circuit breaker ${decision.state} for ${upstreamUrl}`);
-    err.code = 'CIRCUIT_OPEN'; err.retryAfterMs = decision.retryAfterMs;
-    throw err;
-  }
-  try {
-    const result = await requestFn();
-    recordSuccess(upstreamUrl);
-    return result;
-  } catch (err) {
-    if (!err.statusCode || err.statusCode >= 500) recordFailure(upstreamUrl);
-    throw err;
-  }
-}
-
 async function persistAsync(upstreamUrl, s) {
   try {
     await queryRaw(
@@ -119,7 +117,6 @@ async function persistAsync(upstreamUrl, s) {
 
 async function loadPersistedState() {
   try {
-    const { queryMany } = require('../database/pool');
     const rows = await queryMany('SELECT * FROM circuit_breaker_state', []);
     for (const row of rows) {
       state.set(row.upstream_url, {
@@ -136,4 +133,4 @@ function configure(opts) { Object.assign(cfg, opts); }
 function getState(upstreamUrl) { return get(upstreamUrl); }
 function listAll() { return Array.from(state.entries()).map(([url, s]) => ({ upstreamUrl: url, ...s })); }
 
-module.exports = { allowRequest, recordSuccess, recordFailure, withBreaker, loadPersistedState, configure, getState, listAll };
+module.exports = { allowRequest, recordSuccess, recordFailure, loadPersistedState, configure, getState, listAll };

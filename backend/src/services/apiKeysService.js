@@ -21,6 +21,11 @@ async function list({ limit = 100, offset = 0 } = {}) {
   return queryMany(`SELECT ${COLS} FROM api_keys ORDER BY created_at DESC LIMIT $1 OFFSET $2`, [limit, offset]);
 }
 
+async function count() {
+  const r = await queryOne('SELECT COUNT(*)::int AS c FROM api_keys');
+  return r?.c || 0;
+}
+
 async function issue({ name, scopes = [], rateLimitPerMin = 100, expiresInDays = null, environment = 'live' }) {
   if (!name) throw new ValidationError('API key name is required');
   if (rateLimitPerMin < 1 || rateLimitPerMin > 100000) throw new ValidationError('rateLimitPerMin must be between 1 and 100000');
@@ -73,4 +78,4 @@ async function validate(rawKey) {
   return { valid: true, apiKey: key };
 }
 
-module.exports = { getById, list, issue, update, setEnabled, revoke, validate };
+module.exports = { getById, list, count, issue, update, setEnabled, revoke, validate };

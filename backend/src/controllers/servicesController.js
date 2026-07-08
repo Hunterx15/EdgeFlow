@@ -4,14 +4,14 @@
 
 const servicesService = require('../services/servicesService');
 const { ok, paginate } = require('../utils/http');
+const { parsePagination, parseBoolean } = require('../utils/controllerHelpers');
 
 async function list(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit, 10) || 100;
-    const offset = parseInt(req.query.offset, 10) || 0;
+    const { limit, offset, page } = parsePagination(req.query);
     const enabledOnly = req.query.enabled === 'true';
     const items = await servicesService.list({ limit, offset, enabledOnly });
-    return ok(res, items, paginate({ page: Math.floor(offset / limit) + 1, limit, total: items.length }));
+    return ok(res, items, paginate({ page, limit, total: items.length }));
   } catch (err) { next(err); }
 }
 
@@ -36,7 +36,7 @@ async function update(req, res, next) {
 }
 
 async function setEnabled(req, res, next) {
-  try { return ok(res, await servicesService.setEnabled(req.params.id, req.body.enabled === true)); }
+  try { return ok(res, await servicesService.setEnabled(req.params.id, parseBoolean(req.body?.enabled, false))); }
   catch (err) { next(err); }
 }
 

@@ -2,7 +2,7 @@
  * EdgeFlow - Logs controller
  */
 
-const { queryMany, queryOne, queryRaw } = require('../database/pool');
+const { queryMany, queryOne } = require('../database/pool');
 const { ok, paginate } = require('../utils/http');
 
 async function list(req, res, next) {

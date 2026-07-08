@@ -25,6 +25,16 @@ const swaggerSpec = require("./docs/swagger");
 function createApp() {
   const app = express();
   app.disable("x-powered-by");
+
+  // Trust the proxy chain so req.ip, req.secure, and req.protocol reflect
+  // the real client (not the proxy). This is REQUIRED for:
+  //   - Secure cookie flag to work behind TLS-terminating proxies (Render,
+  //     Cloudflare, nginx)
+  //   - express-rate-limit to see the real client IP
+  //   - X-Forwarded-For to be trusted
+  // The trust count comes from config (default 1 = single reverse proxy).
+  app.set("trust proxy", config.server.trustProxy);
+
   app.use(
     helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }),
   );
@@ -98,8 +108,34 @@ function createApp() {
   app.use(config.server.apiPrefix, apiUrlencoded, apiBodyParser, apiRoutes);
 
   // Mount the gateway proxy WITHOUT body parsing — the proxy needs the
-  // raw request stream to forward to the upstream.
-  app.use(config.server.gatewayPrefix, proxyMiddleware);
+  // raw request stream to forward to the upstream. We DO set a body size
+  // limit via a raw body parser that rejects oversized requests BEFORE
+  // they reach http-proxy. This prevents OOM via Buffer.concat on huge
+  // upstream request bodies.
+  //
+  // The limit is config.server.bodyLimit (default 1mb). For file-upload
+  // routes, set a higher limit per-route (future enhancement).
+  app.use(
+    config.server.gatewayPrefix,
+    (req, res, next) => {
+      // Light-weight size guard: reject requests whose Content-Length
+      // exceeds the limit. This is a pre-emptive check; the actual body
+      // is still streamed by http-proxy.
+      const cl = parseInt(req.headers["content-length"], 10);
+      const limitBytes = parseInt(config.server.bodyLimit) * 1024 * 1024 || 1048576;
+      if (Number.isFinite(cl) && cl > limitBytes) {
+        return res.status(413).json({
+          success: false,
+          error: {
+            code: "PAYLOAD_TOO_LARGE",
+            message: `Request body exceeds ${config.server.bodyLimit} limit`,
+          },
+        });
+      }
+      next();
+    },
+    proxyMiddleware,
+  );
 
   app.use(notFound);
   app.use(errorHandler);

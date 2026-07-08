@@ -59,11 +59,11 @@ services:
       DATABASE_URL: postgresql://edgeflow:edgeflow@postgres:5432/edgeflow
       REDIS_URL: redis://redis:6379
       REDIS_ENABLED: "true"
-      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string-in-production}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-to-a-different-long-random-string}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required. Generate with: openssl rand -hex 64}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required. Generate with: openssl rand -hex 64}
       CORS_ORIGINS: http://localhost:8080,http://localhost:5173,http://localhost:3000
       SEED_ADMIN_EMAIL: admin@edgeflow.dev
-      SEED_ADMIN_PASSWORD: Admin@12345
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD is required}
       SEED_ADMIN_NAME: EdgeFlow Admin
     ports: ["4000:4000"]
     volumes:

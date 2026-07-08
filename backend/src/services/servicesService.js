@@ -1,16 +1,27 @@
 /**
  * EdgeFlow - Services service
  *
- * CRUD for backend services. Talks to PostgreSQL directly. After any
- * mutation we invalidate the in-memory route cache and reschedule the
- * health-check scheduler.
+ * CRUD for backend services. Talks to PostgreSQL directly.
+ *
+ * ARCHITECTURE (event-driven, no circular dependencies):
+ *   Previously this module required routeCache (to invalidate after
+ *   mutations) and healthScheduler (to reschedule checks). But
+ *   healthScheduler required servicesService (to load service data),
+ *   creating a cycle. Now this module EMITS events via the event bus,
+ *   and routeCache + healthScheduler subscribe to them. The dependency
+ *   graph is now acyclic:
+ *
+ *     servicesService ──emit('service.*')──> eventBus
+ *     routeCache       ──on('service.*')──> invalidate()
+ *     healthScheduler  ──on('service.*')──> reschedule()
+ *
+ * Neither routeCache nor healthScheduler are required by this module.
  */
 
 const { queryOne, queryMany, queryRaw } = require('../database/pool');
-const { NotFoundError, ConflictError, ValidationError } = require('../utils/http');
+const { NotFoundError, ConflictError } = require('../utils/http');
 const { normalizeUpstreamTargets } = require('../utils/upstream');
-const routeCache = require('../gateway/routeCache');
-const healthScheduler = require('./healthScheduler');
+const eventBus = require('../utils/eventBus');
 
 const COLS = `id, name, slug, description, base_path, upstream_targets, version,
   enabled, health_check_path, health_check_interval_ms, last_heartbeat_at,
@@ -55,7 +66,8 @@ async function create(input) {
       input.version || 'v1', input.enabled !== false, input.healthCheckPath || '/health',
       input.healthCheckIntervalMs || 30000, JSON.stringify(input.metadata || {})]
   );
-  healthScheduler.schedule(svc);
+  // Emit event — healthScheduler and routeCache subscribe and react.
+  eventBus.emit(eventBus.EVENTS.SERVICE_CREATED, svc);
   return svc;
 }
 
@@ -86,37 +98,44 @@ async function update(id, patch) {
   if (sets.length === 0) return existing;
   values.push(id);
   const updated = await queryOne(`UPDATE services SET ${sets.join(', ')} WHERE id = $${i} RETURNING ${COLS}`, values);
-  routeCache.invalidate();
-  healthScheduler.reschedule(updated);
+  eventBus.emit(eventBus.EVENTS.SERVICE_UPDATED, updated);
   return updated;
 }
 
 async function setEnabled(id, enabled) {
   const updated = await queryOne(`UPDATE services SET enabled = $1 WHERE id = $2 RETURNING ${COLS}`, [enabled, id]);
   if (!updated) throw new NotFoundError('Service');
-  routeCache.invalidate();
-  if (!enabled) healthScheduler.unschedule(id);
-  else healthScheduler.reschedule(updated);
+  eventBus.emit(eventBus.EVENTS.SERVICE_TOGGLED, updated);
   return updated;
 }
 
 async function updateHeartbeat(id, status, targetHealthMap = null) {
+  let result;
   if (targetHealthMap) {
     const svc = await getById(id);
     if (svc) {
       const updated = svc.upstream_targets.map((t) => ({ ...t, healthy: targetHealthMap[t.url] ?? t.healthy }));
-      return queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1, upstream_targets = $2 WHERE id = $3 RETURNING ${COLS}`,
+      result = await queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1, upstream_targets = $2 WHERE id = $3 RETURNING ${COLS}`,
         [status, JSON.stringify(updated), id]);
     }
   }
-  return queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1 WHERE id = $2 RETURNING ${COLS}`, [status, id]);
+  if (!result) {
+    result = await queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1 WHERE id = $2 RETURNING ${COLS}`, [status, id]);
+  }
+  // Emit health check event — monitoringService can subscribe if needed.
+  eventBus.emit(eventBus.EVENTS.HEALTH_CHECKED, { id, status, targetHealthMap });
+  return result;
 }
 
 async function remove(id) {
-  await getById(id);
-  healthScheduler.unschedule(id);
+  const service = await getById(id);
   await queryRaw('DELETE FROM services WHERE id = $1', [id]);
-  routeCache.invalidate();
+  // Include upstream_targets in the event so circuitBreaker can clean up
+  // its state for the deleted upstreams.
+  eventBus.emit(eventBus.EVENTS.SERVICE_DELETED, {
+    id,
+    upstreamTargets: service.upstream_targets || [],
+  });
   return true;
 }
 

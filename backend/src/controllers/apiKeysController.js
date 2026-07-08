@@ -4,13 +4,15 @@
 
 const apiKeysService = require('../services/apiKeysService');
 const { ok, paginate } = require('../utils/http');
+const { parsePagination, parseBoolean } = require('../utils/controllerHelpers');
 
 async function list(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit, 10) || 100;
-    const offset = parseInt(req.query.offset, 10) || 0;
+    const { limit, offset, page } = parsePagination(req.query);
     const items = await apiKeysService.list({ limit, offset });
-    return ok(res, items, paginate({ page: Math.floor(offset / limit) + 1, limit, total: items.length }));
+    // Fetch total count separately — items.length is just the page size.
+    const total = await apiKeysService.count();
+    return ok(res, items, paginate({ page, limit, total }));
   } catch (err) { next(err); }
 }
 
@@ -32,7 +34,7 @@ async function update(req, res, next) {
 }
 
 async function setEnabled(req, res, next) {
-  try { return ok(res, await apiKeysService.setEnabled(req.params.id, req.body.enabled === true)); }
+  try { return ok(res, await apiKeysService.setEnabled(req.params.id, parseBoolean(req.body?.enabled, false))); }
   catch (err) { next(err); }
 }
 

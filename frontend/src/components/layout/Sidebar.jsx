@@ -74,7 +74,7 @@ export default function Sidebar({ systemStatus = 'ok' }) {
           )}>{systemStatus}</span>
         </div>
         <div className="text-[10px] text-slate-600 leading-relaxed">
-          EdgeFlow v1.0.0 · Built for SDE interviews
+          EdgeFlow v2.0.0 · Production API Gateway
         </div>
       </div>
     </aside>

@@ -177,6 +177,94 @@ async function p95Latency({ since } = {}) {
   return Number(r?.p95) || 0;
 }
 
+// ── Latency percentiles (P50, P95, P99) in a single query ──
+async function latencyPercentiles({ since } = {}) {
+  const sinceIso = since || new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const r = await queryOne(
+    `SELECT
+       COALESCE(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms), 0)::float AS p50,
+       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::float AS p95,
+       COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms), 0)::float AS p99,
+       COALESCE(AVG(latency_ms), 0)::float AS avg,
+       COALESCE(MAX(latency_ms), 0)::int AS max
+     FROM request_logs WHERE created_at >= $1 AND latency_ms IS NOT NULL`,
+    [sinceIso],
+  );
+  return {
+    p50: Math.round(Number(r?.p50) || 0),
+    p95: Math.round(Number(r?.p95) || 0),
+    p99: Math.round(Number(r?.p99) || 0),
+    avg: Math.round(Number(r?.avg) || 0),
+    max: Number(r?.max) || 0,
+  };
+}
+
+// ── Slowest endpoints (by avg latency, min 5 requests) ──
+async function slowEndpoints({ since, limit = 10 } = {}) {
+  const sinceIso = since || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  return queryMany(
+    `SELECT public_path, method,
+       COUNT(*)::bigint AS requests,
+       COALESCE(AVG(latency_ms), 0)::float AS avg_latency_ms,
+       COALESCE(MAX(latency_ms), 0)::int AS max_latency_ms,
+       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::float AS p95_latency_ms
+     FROM request_logs
+     WHERE created_at >= $1 AND latency_ms IS NOT NULL
+     GROUP BY public_path, method
+     HAVING COUNT(*) >= 5
+     ORDER BY avg_latency_ms DESC
+     LIMIT $2`,
+    [sinceIso, limit],
+  );
+}
+
+// ── HTTP method distribution ──
+async function methodDistribution({ since } = {}) {
+  const sinceIso = since || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  return queryMany(
+    `SELECT method, COUNT(*)::bigint AS count,
+       COALESCE(AVG(latency_ms), 0)::float AS avg_latency_ms
+     FROM request_logs WHERE created_at >= $1
+     GROUP BY method ORDER BY count DESC`,
+    [sinceIso],
+  );
+}
+
+// ── Service distribution (requests per service) ──
+async function serviceDistribution({ since } = {}) {
+  const sinceIso = since || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  return queryMany(
+    `SELECT s.name AS service_name, s.slug,
+       COUNT(*)::bigint AS requests,
+       COUNT(*) FILTER (WHERE r.status_code >= 400)::bigint AS errors,
+       COALESCE(AVG(r.latency_ms), 0)::float AS avg_latency_ms,
+       SUM(CASE WHEN r.cache_hit THEN 1 ELSE 0 END)::bigint AS cache_hits
+     FROM request_logs r
+     LEFT JOIN services s ON s.id = r.service_id
+     WHERE r.created_at >= $1
+     GROUP BY s.name, s.slug
+     ORDER BY requests DESC`,
+    [sinceIso],
+  );
+}
+
+// ── Traffic heatmap: requests per hour for last N days ──
+async function trafficHeatmap({ days = 7 } = {}) {
+  const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  return queryMany(
+    `SELECT
+       DATE_TRUNC('hour', created_at) AS hour,
+       COUNT(*)::int AS requests,
+       COUNT(*) FILTER (WHERE status_code >= 400)::int AS errors,
+       COALESCE(AVG(latency_ms), 0)::float AS avg_latency_ms
+     FROM request_logs
+     WHERE created_at >= $1
+     GROUP BY hour
+     ORDER BY hour`,
+    [sinceIso],
+  );
+}
+
 async function activeRequests() {
   // Approximate: count of requests logged in the last 5 seconds
   const r = await queryOne(
@@ -202,6 +290,11 @@ module.exports = {
   topRoutes,
   statusBreakdown,
   p95Latency,
+  latencyPercentiles,
+  slowEndpoints,
+  methodDistribution,
+  serviceDistribution,
+  trafficHeatmap,
   activeRequests,
   requestsPerSecond,
 };

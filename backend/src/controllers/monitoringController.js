@@ -27,13 +27,25 @@ async function cacheStats(_req, res, next) {
 }
 
 async function cacheFlush(_req, res, next) {
-  try { await cacheService.flushAll(); return ok(res, { flushed: true }); }
-  catch (err) { next(err); }
+  try {
+    // SECURITY FIX: Previously called cacheService.flushAll() which calls
+    // redis.flushdb() — wiping the ENTIRE Redis DB including rate-limit
+    // counters, circuit-breaker state, and any other services sharing the
+    // Redis instance. Now we only invalidate cache:* keys.
+    await cacheService.invalidatePattern('cache:*');
+    return ok(res, { flushed: true, scope: 'cache:*' });
+  } catch (err) { next(err); }
 }
 
 async function cacheInvalidate(req, res, next) {
   try {
-    const pattern = req.body?.pattern || 'cache:*';
+    let pattern = req.body?.pattern || 'cache:*';
+    // SECURITY: Enforce that the pattern only matches cache keys, never
+    // rate-limit (rl:*) or circuit-breaker keys. If the caller passes a
+    // pattern without the cache: prefix, prepend it.
+    if (!pattern.startsWith('cache:')) {
+      pattern = 'cache:*';
+    }
     await cacheService.invalidatePattern(pattern);
     return ok(res, { invalidated: pattern });
   } catch (err) { next(err); }
@@ -46,7 +58,9 @@ async function circuitBreakers(_req, res, next) {
 
 async function resetCircuit(req, res, next) {
   try {
-    const upstreamUrl = req.params.upstreamUrl || req.body?.upstreamUrl;
+    // upstreamUrl is now passed in the body or query (not as a path param,
+    // because URLs contain `/` which breaks Express path matching).
+    const upstreamUrl = req.body?.upstreamUrl || req.query?.upstreamUrl;
     if (upstreamUrl) {
       const s = circuitBreaker.getState(upstreamUrl);
       s.state = 'closed'; s.failureCount = 0; s.successCount = 0; s.halfOpenInflight = 0;

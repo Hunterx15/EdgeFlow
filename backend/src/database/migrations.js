@@ -200,12 +200,44 @@ const migrations = [
          WHERE public_path = $1 OR public_path LIKE $1 || '/%'`,
         [gatewayPrefix]
       );
-      // Log how many rows were fixed. Use console.log (not the structured
-      // logger) because the logger may not be fully initialized at migration
-      // time, and this is a one-time data-fix message.
       if (result.rowCount && result.rowCount > 0) {
-        console.log(`[migration 0002] stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)`);
+        // Migrations run before the HTTP server starts. The logger module
+        // IS available (it's pure JS with no external deps), so we use it
+        // instead of console.log for consistent structured output.
+        try {
+          const logger = require('../utils/logger');
+          logger.info(`migration 0002: stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)`);
+        } catch {
+          // Fallback if logger somehow isn't available
+          process.stdout.write(`[migration 0002] stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)\n`);
+        }
       }
+    },
+  },
+  {
+    // ────────────────────────────────────────────────────────────────
+    // Migration 0003: Add performance indexes for analytics queries.
+    //
+    // The request_logs table grows quickly (one row per proxied request).
+    // Without these indexes, PERCENTILE_CONT, top-routes, and
+    // status-breakdown queries do full table scans + sorts.
+    //
+    // Indexes added:
+    //   (created_at, latency_ms)       — for P50/P95/P99 percentile queries
+    //   (created_at, public_path, method) — for top-routes and slow-endpoints
+    //   (created_at, service_id)       — for per-service analytics
+    // ────────────────────────────────────────────────────────────────
+    name: '0003_add_analytics_indexes',
+    up: async (client) => {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_logs_created_latency
+          ON request_logs(created_at, latency_ms)
+          WHERE latency_ms IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_logs_created_path_method
+          ON request_logs(created_at, public_path, method);
+        CREATE INDEX IF NOT EXISTS idx_logs_created_service
+          ON request_logs(created_at, service_id);
+      `);
     },
   },
 ];

@@ -17,12 +17,28 @@
 
 const routesService = require("../services/routesService");
 const logger = require("../utils/logger");
+const eventBus = require("../utils/eventBus");
 
 let exactRoutes = new Map();
 let wildcardRoutes = [];
 let lastRefreshedAt = 0;
 let inFlightRefresh = null;
 const REFRESH_INTERVAL_MS = 60_000;
+
+// ── Subscribe to route + service events ──
+// Previously, routesService and servicesService called routeCache.invalidate()
+// directly via require('../gateway/routeCache').invalidate(). This created
+// circular dependencies (routeCache → routesService → routeCache). Now they
+// emit events, and we subscribe here — no cycle.
+eventBus.on(eventBus.EVENTS.ROUTE_CREATED, () => invalidate());
+eventBus.on(eventBus.EVENTS.ROUTE_UPDATED, () => invalidate());
+eventBus.on(eventBus.EVENTS.ROUTE_TOGGLED, () => invalidate());
+eventBus.on(eventBus.EVENTS.ROUTE_DELETED, () => invalidate());
+// Service changes can affect which routes are usable (enabled service),
+// so invalidate the route cache when services change too.
+eventBus.on(eventBus.EVENTS.SERVICE_UPDATED, () => invalidate());
+eventBus.on(eventBus.EVENTS.SERVICE_TOGGLED, () => invalidate());
+eventBus.on(eventBus.EVENTS.SERVICE_DELETED, () => invalidate());
 
 async function refresh() {
   // Deduplicate concurrent refresh calls — they all share one Promise.

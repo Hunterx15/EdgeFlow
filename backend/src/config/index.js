@@ -5,9 +5,12 @@
  * The rest of the codebase MUST consume config from this module
  * instead of reading process.env directly.
  *
- * EdgeFlow uses a SIMPLER architecture than FlowGate:
- *   Routes -> Controllers -> Services -> Database
- * There is NO repository layer. Services talk to the pg Pool directly.
+ * Production safety:
+ *   In production mode, the config validates that critical secrets
+ *   (JWT_SECRET, JWT_REFRESH_SECRET, SEED_ADMIN_PASSWORD, DATABASE_URL)
+ *   are set and do NOT match the insecure dev defaults. If they do, the
+ *   process exits with a clear error — preventing accidental deployment
+ *   with forgeable JWTs or a known admin password.
  */
 
 const fs = require('fs');
@@ -21,8 +24,20 @@ if (fs.existsSync(envPath)) {
 const toInt = (v, f) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : f; };
 const toBool = (v, f = false) => {
   if (v === undefined || v === null || v === '') return f;
-  return v === 'true' || v === '1' || v === 'yes';
+  const lower = String(v).toLowerCase();
+  return lower === 'true' || lower === '1' || lower === 'yes';
 };
+
+// ── Deep freeze — prevents accidental mutation of nested config objects ──
+function deepFreeze(obj) {
+  Object.keys(obj).forEach((key) => {
+    const prop = obj[key];
+    if (typeof prop === 'object' && prop !== null && !Array.isArray(prop)) {
+      deepFreeze(prop);
+    }
+  });
+  return Object.freeze(obj);
+}
 
 const config = {
   env: process.env.NODE_ENV || 'development',
@@ -37,6 +52,11 @@ const config = {
     corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
       .split(',').map((s) => s.trim()).filter(Boolean),
     bodyLimit: process.env.BODY_LIMIT || '1mb',
+    // Number of proxies between the public internet and EdgeFlow.
+    // Set to 1 for a single reverse proxy (Render, nginx, Cloudflare).
+    // This makes req.ip, req.secure, and req.protocol reflect the real
+    // client, not the proxy.
+    trustProxy: toInt(process.env.TRUST_PROXY, 1),
   },
 
   database: {
@@ -82,9 +102,11 @@ const config = {
 
   gateway: {
     requestTimeoutMs: toInt(process.env.GATEWAY_TIMEOUT_MS, 30000),
-    // Retry once on failure - per requirements
     maxRetries: toInt(process.env.GATEWAY_MAX_RETRIES, 1),
     retryDelayMs: toInt(process.env.GATEWAY_RETRY_DELAY_MS, 200),
+    // Max upstream response size to buffer (for cacheable routes). Larger
+    // responses are streamed directly to the client without caching.
+    maxBufferBytes: toInt(process.env.GATEWAY_MAX_BUFFER_BYTES, 2 * 1024 * 1024),
     circuitBreaker: {
       failureThreshold: toInt(process.env.CB_FAILURE_THRESHOLD, 5),
       successThreshold: toInt(process.env.CB_SUCCESS_THRESHOLD, 2),
@@ -110,5 +132,41 @@ const config = {
   },
 };
 
-Object.freeze(config);
+// ── Production fail-fast validation ──
+//
+// In production, refuse to boot if critical secrets are missing or match
+// the insecure dev defaults. This prevents accidental deployment with
+// forgeable JWTs or a publicly-known admin password.
+if (config.isProduction) {
+  const INSECURE_DEFAULTS = [
+    'edgeflow-dev-secret-change-me',
+    'edgeflow-dev-refresh-secret-change-me',
+  ];
+  const errors = [];
+
+  if (!process.env.JWT_SECRET || INSECURE_DEFAULTS.includes(config.jwt.secret)) {
+    errors.push('JWT_SECRET must be set to a secure value in production');
+  }
+  if (!process.env.JWT_REFRESH_SECRET || INSECURE_DEFAULTS.includes(config.jwt.refreshSecret)) {
+    errors.push('JWT_REFRESH_SECRET must be set to a secure value in production');
+  }
+  if (!process.env.SEED_ADMIN_PASSWORD || config.seed.adminPassword === 'Admin@12345') {
+    errors.push('SEED_ADMIN_PASSWORD must be changed from the default in production');
+  }
+  if (!process.env.DATABASE_URL) {
+    errors.push('DATABASE_URL must be set in production');
+  }
+  if (config.jwt.secret.length < 32) {
+    errors.push('JWT_SECRET must be at least 32 characters in production');
+  }
+
+  if (errors.length > 0) {
+    console.error('\n❌ FATAL: Production config validation failed:\n');
+    errors.forEach((e) => console.error(`   • ${e}`));
+    console.error('\n   Refusing to boot. Set the required environment variables.\n');
+    process.exit(1);
+  }
+}
+
+deepFreeze(config);
 module.exports = config;

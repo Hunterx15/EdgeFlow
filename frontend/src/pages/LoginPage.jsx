@@ -194,7 +194,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-600 mt-6">
-          EdgeFlow · A modern API Gateway built for SDE interviews
+          EdgeFlow · High-Performance API Gateway
         </p>
       </div>
     </div>
