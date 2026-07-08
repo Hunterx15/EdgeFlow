@@ -34,10 +34,12 @@ const STAGE_LABELS = {
 };
 
 function getStageLabel(stage, actual) {
-  if (stage.key === "Cache Lookup") {
-    if (stage.key === "Cache Lookup") {
-      return actual?.result === "skipped" ? "Cache Skipped" : "Cache Miss";
+  if (stage.key === 'Cache Lookup') {
+    if (actual?.result === 'skipped') {
+      return 'Cache Skipped';
     }
+
+    return log.cache_hit ? 'Cache HIT' : 'Cache MISS';
   }
   if (stage.key === "Rate Limit") {
     return "Rate Limited";
