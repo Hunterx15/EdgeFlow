@@ -46,6 +46,16 @@ describe('API Gateway Core App Endpoints', () => {
     expect(res.body.service).toBe('edgeflow');
   });
 
+  test('GET / and HEAD / return 200 for cloud health checks', async () => {
+    const resGet = await request(app).get('/');
+    expect(resGet.status).toBe(200);
+    expect(resGet.body.status).toBe('ok');
+    expect(resGet.body.service).toBe('edgeflow');
+
+    const resHead = await request(app).head('/');
+    expect(resHead.status).toBe(200);
+  });
+
   test('GET /api/v1/unknown returns 404', async () => {
     const res = await request(app).get('/api/v1/unknown-endpoint-xyz');
     expect(res.status).toBe(404);

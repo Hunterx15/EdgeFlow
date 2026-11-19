@@ -73,13 +73,18 @@ function createApp() {
   app.use(requestIdMiddleware);
   app.use(responseLogger);
 
-  app.get("/health", (_req, res) =>
-    res.json({
+  const rootHealthHandler = (_req, res) =>
+    res.status(200).json({
       status: "ok",
       service: "edgeflow",
+      version: "1.0.0",
+      docs: "/api/v1/docs",
+      health: "/health",
       timestamp: new Date().toISOString(),
-    }),
-  );
+    });
+
+  app.get(["/", "/health"], rootHealthHandler);
+  app.head(["/", "/health"], (_req, res) => res.status(200).end());
 
   try {
     const swaggerUi = require("swagger-ui-express");

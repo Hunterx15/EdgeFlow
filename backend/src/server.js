@@ -35,9 +35,24 @@ const { createApp } = require('./app');
 async function boot() {
   logger.info('server: booting EdgeFlow', { env: config.env, port: config.server.port });
 
-  await migrate();
-  await db.ping();
-  logger.info('server: database ready');
+  // Resilient DB connection retry for cloud/serverless cold boots (e.g. Render PostgreSQL)
+  const maxDbAttempts = 5;
+  for (let attempt = 1; attempt <= maxDbAttempts; attempt++) {
+    try {
+      await migrate();
+      await db.ping();
+      logger.info('server: database ready');
+      break;
+    } catch (err) {
+      if (attempt === maxDbAttempts) {
+        throw err;
+      }
+      logger.warn(`server: database connection attempt ${attempt}/${maxDbAttempts} failed, retrying in 2s...`, {
+        error: err.message,
+      });
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
 
   await redis.getClient();
   logger.info('server: redis ready', { fallback: redis.isFallback() });

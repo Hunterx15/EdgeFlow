@@ -69,7 +69,7 @@ const config = {
     poolMin: toInt(process.env.DB_POOL_MIN, 2),
     poolMax: toInt(process.env.DB_POOL_MAX, 10),
     idleTimeoutMs: toInt(process.env.DB_IDLE_TIMEOUT_MS, 30000),
-    connectionTimeoutMs: toInt(process.env.DB_CONN_TIMEOUT_MS, 5000),
+    connectionTimeoutMs: toInt(process.env.DB_CONN_TIMEOUT_MS, 15000),
   },
 
   redis: {
