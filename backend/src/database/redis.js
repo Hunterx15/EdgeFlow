@@ -25,54 +25,17 @@ class MemoryFallback {
       }
     }, 60000).unref?.();
   }
-  async get(k) {
-    const e = memoryStore.get(k);
-    if (!e) return null;
-    if (e.expiresAt && e.expiresAt <= Date.now()) {
-      memoryStore.delete(k);
-      return null;
-    }
-    return e.value;
-  }
-  async set(k, v, ttl) {
-    memoryStore.set(k, {
-      value: v,
-      expiresAt: ttl ? Date.now() + ttl * 1000 : null,
-    });
-    return "OK";
-  }
-  async del(k) {
-    return memoryStore.delete(k) ? 1 : 0;
-  }
-  async incr(k) {
-    const e = memoryStore.get(k) || { value: "0" };
-    const n = parseInt(e.value, 10) + 1;
-    memoryStore.set(k, { value: String(n), expiresAt: e.expiresAt });
-    return n;
-  }
-  async expire(k, ttl) {
-    const e = memoryStore.get(k);
-    if (!e) return 0;
-    e.expiresAt = Date.now() + ttl * 1000;
-    return 1;
-  }
-  async ping() {
-    return "PONG";
-  }
-  async info() {
-    return "redis_version:memory-fallback\nused_memory:0\n";
-  }
-  async dbSize() {
-    return memoryStore.size;
-  }
-  async flushAll() {
-    memoryStore.clear();
-    return "OK";
-  }
-  async disconnect() {
-    clearInterval(this._interval);
-    memoryStore.clear();
-  }
+  async get(k) { const e = memoryStore.get(k); if (!e) return null; if (e.expiresAt && e.expiresAt <= Date.now()) { memoryStore.delete(k); return null; } return e.value; }
+  async set(k, v, ttl) { memoryStore.set(k, { value: v, expiresAt: ttl ? Date.now() + ttl * 1000 : null }); return 'OK'; }
+  async del(k) { return memoryStore.delete(k) ? 1 : 0; }
+  async incr(k) { const e = memoryStore.get(k) || { value: '0' }; const n = parseInt(e.value, 10) + 1; memoryStore.set(k, { value: String(n), expiresAt: e.expiresAt }); return n; }
+  async expire(k, ttl) { const e = memoryStore.get(k); if (!e) return 0; e.expiresAt = Date.now() + ttl * 1000; return 1; }
+  async publish() { return 0; }
+  async ping() { return 'PONG'; }
+  async info() { return 'redis_version:memory-fallback\nused_memory:0\n'; }
+  async dbSize() { return memoryStore.size; }
+  async flushAll() { memoryStore.clear(); return 'OK'; }
+  async disconnect() { clearInterval(this._interval); memoryStore.clear(); }
 }
 
 let fallbackInstance = null;

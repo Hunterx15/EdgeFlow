@@ -60,10 +60,11 @@ function weightedRoundRobin(serviceId, targets) {
 }
 
 function reset(serviceId) { counters.delete(serviceId); }
+function resetAll() { counters.clear(); }
 function snapshot() {
   const out = {};
   for (const [id, s] of counters) out[id] = { counter: s.counter };
   return out;
 }
 
-module.exports = { nextTarget, reset, snapshot };
+module.exports = { nextTarget, reset, resetAll, snapshot };

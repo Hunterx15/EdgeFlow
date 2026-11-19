@@ -201,14 +201,10 @@ const migrations = [
         [gatewayPrefix]
       );
       if (result.rowCount && result.rowCount > 0) {
-        // Migrations run before the HTTP server starts. The logger module
-        // IS available (it's pure JS with no external deps), so we use it
-        // instead of console.log for consistent structured output.
         try {
           const logger = require('../utils/logger');
           logger.info(`migration 0002: stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)`);
         } catch {
-          // Fallback if logger somehow isn't available
           process.stdout.write(`[migration 0002] stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)\n`);
         }
       }
@@ -217,15 +213,6 @@ const migrations = [
   {
     // ────────────────────────────────────────────────────────────────
     // Migration 0003: Add performance indexes for analytics queries.
-    //
-    // The request_logs table grows quickly (one row per proxied request).
-    // Without these indexes, PERCENTILE_CONT, top-routes, and
-    // status-breakdown queries do full table scans + sorts.
-    //
-    // Indexes added:
-    //   (created_at, latency_ms)       — for P50/P95/P99 percentile queries
-    //   (created_at, public_path, method) — for top-routes and slow-endpoints
-    //   (created_at, service_id)       — for per-service analytics
     // ────────────────────────────────────────────────────────────────
     name: '0003_add_analytics_indexes',
     up: async (client) => {
@@ -237,6 +224,14 @@ const migrations = [
           ON request_logs(created_at, public_path, method);
         CREATE INDEX IF NOT EXISTS idx_logs_created_service
           ON request_logs(created_at, service_id);
+      `);
+    },
+  },
+  {
+    name: '0004_multi_session_refresh_tokens',
+    up: async (client) => {
+      await client.query(`
+        ALTER TABLE users ALTER COLUMN refresh_token_jti TYPE TEXT;
       `);
     },
   },

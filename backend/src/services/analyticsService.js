@@ -1,57 +1,101 @@
 /**
  * EdgeFlow - Analytics service
  *
- * Writes per-request rollups into analytics (per-service, per-minute).
+ * Micro-batches per-minute rollups in memory and flushes to PostgreSQL
+ * periodically to avoid lock contention on high-throughput routes.
  * Provides aggregate queries for the dashboard.
  */
 
 const { queryOne, queryMany, queryRaw } = require("../database/pool");
-
 const logger = require("../utils/logger");
 
-// BUG FIX NOTE on avg_latency_ms:
-// The previous formula was
-//   (avg_latency_ms * total_requests + $5) / (total_requests + 1)
-// but `total_requests` had ALREADY been incremented by `+ 1` in the
-// same SET clause, so the denominator was `total_requests + 1` while
-// the numerator used the post-increment value too — yielding an
-// off-by-one weighted average. The correct running-average formula
-// uses the PRE-increment count for the numerator weight and the
-// POST-increment count for the denominator:
-//   (avg_latency_ms * (total_requests - 1) + $5) / total_requests
-async function record({ serviceId, statusCode, latencyMs, cacheHit }) {
+const FLUSH_INTERVAL_MS = 1000;
+let analyticsBuffer = new Map();
+let isFlushing = false;
+
+let timer = null;
+if (process.env.NODE_ENV !== 'test') {
+  timer = setInterval(() => {
+    flush().catch(() => {});
+  }, FLUSH_INTERVAL_MS);
+  timer.unref?.();
+}
+
+function record({ serviceId, statusCode, latencyMs, cacheHit }) {
   if (!serviceId) return;
   const bucketMinute = new Date();
   bucketMinute.setSeconds(0, 0);
+  const key = `${bucketMinute.getTime()}:${serviceId}`;
+
   const success = statusCode >= 200 && statusCode < 400 ? 1 : 0;
   const error = statusCode >= 400 ? 1 : 0;
-  try {
-    await queryRaw(
-      `INSERT INTO analytics (bucket_minute, service_id, total_requests, success_count, error_count,
-         avg_latency_ms, max_latency_ms, cache_hit_count)
-        VALUES ($1, $2, 1, $3, $4, $5, $6, $7)
-       ON CONFLICT (bucket_minute, service_id) DO UPDATE SET
-    total_requests = analytics.total_requests + 1,
-    success_count = analytics.success_count + $3,
-    error_count = analytics.error_count + $4,
-    cache_hit_count = analytics.cache_hit_count + $7,
-    avg_latency_ms = (analytics.avg_latency_ms * (analytics.total_requests - 1) + $5) / analytics.total_requests,
-    max_latency_ms = GREATEST(analytics.max_latency_ms, $6)`,
-      [
-        bucketMinute,
-        serviceId,
-        success,
-        error,
-        Number(latencyMs || 0), // $5 -> avg_latency_ms
-        Math.round(latencyMs || 0), // $6 -> max_latency_ms
-        cacheHit ? 1 : 0, // $7 -> cache_hit_count
-      ],
-    );
-  } catch (err) {
-    // BUG FIX: use the structured logger instead of console.error with
-    // decorative banners that polluted production logs.
-    logger.warn("analytics: record failed", { error: err.message, serviceId });
+  const lat = Number(latencyMs || 0);
+
+  let b = analyticsBuffer.get(key);
+  if (!b) {
+    b = {
+      bucketMinute,
+      serviceId,
+      totalRequests: 0,
+      successCount: 0,
+      errorCount: 0,
+      cacheHitCount: 0,
+      latencySum: 0,
+      maxLatencyMs: 0,
+    };
+    analyticsBuffer.set(key, b);
   }
+
+  b.totalRequests += 1;
+  b.successCount += success;
+  b.errorCount += error;
+  b.cacheHitCount += cacheHit ? 1 : 0;
+  b.latencySum += lat;
+  b.maxLatencyMs = Math.max(b.maxLatencyMs, Math.round(lat));
+
+  if (analyticsBuffer.size >= 50 && !isFlushing) {
+    flush().catch(() => {});
+  }
+}
+
+async function flush() {
+  if (analyticsBuffer.size === 0 || isFlushing) return;
+  isFlushing = true;
+
+  const entries = Array.from(analyticsBuffer.values());
+  analyticsBuffer.clear();
+
+  for (const b of entries) {
+    try {
+      const avgLat = b.totalRequests > 0 ? b.latencySum / b.totalRequests : 0;
+      await queryRaw(
+        `INSERT INTO analytics (bucket_minute, service_id, total_requests, success_count, error_count,
+           avg_latency_ms, max_latency_ms, cache_hit_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (bucket_minute, service_id) DO UPDATE SET
+           total_requests = analytics.total_requests + EXCLUDED.total_requests,
+           success_count = analytics.success_count + EXCLUDED.success_count,
+           error_count = analytics.error_count + EXCLUDED.error_count,
+           cache_hit_count = analytics.cache_hit_count + EXCLUDED.cache_hit_count,
+           avg_latency_ms = (analytics.avg_latency_ms * analytics.total_requests + EXCLUDED.avg_latency_ms * EXCLUDED.total_requests) / (analytics.total_requests + EXCLUDED.total_requests),
+           max_latency_ms = GREATEST(analytics.max_latency_ms, EXCLUDED.max_latency_ms)`,
+        [
+          b.bucketMinute,
+          b.serviceId,
+          b.totalRequests,
+          b.successCount,
+          b.errorCount,
+          avgLat,
+          b.maxLatencyMs,
+          b.cacheHitCount,
+        ],
+      );
+    } catch (err) {
+      logger.warn("analytics: flush failed", { error: err.message, serviceId: b.serviceId });
+    }
+  }
+
+  isFlushing = false;
 }
 
 async function overview({ since } = {}) {
@@ -99,41 +143,30 @@ async function overview({ since } = {}) {
       id: s.service_id,
       name: s.name,
       slug: s.slug,
-      requests: Number(s.requests),
-      errors: Number(s.errors),
-      avgLatencyMs: Number(s.avg_latency_ms),
-      cacheHits: Number(s.cache_hits),
+      requests: Number(s.requests) || 0,
+      errors: Number(s.errors) || 0,
+      avgLatencyMs: Number(s.avg_latency_ms) || 0,
+      cacheHits: Number(s.cache_hits) || 0,
     })),
   };
 }
 
-async function liveGraph({ minutes = 60 } = {}) {
-  const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
-  const rows = await queryMany(
-    `SELECT bucket_minute AS bucket,
-       SUM(total_requests)::int AS requests,
-       SUM(error_count)::int AS errors,
-       COALESCE(AVG(avg_latency_ms * total_requests) / NULLIF(SUM(total_requests), 0), 0)::float AS avg_latency_ms
-     FROM analytics WHERE bucket_minute >= $1
-     GROUP BY bucket_minute ORDER BY bucket_minute DESC LIMIT $2`,
-    [since, minutes],
+async function liveGraph({ since } = {}) {
+  const sinceIso =
+    since || new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  return queryMany(
+    `SELECT
+       bucket_minute,
+       SUM(total_requests)::bigint AS requests,
+       SUM(error_count)::bigint AS errors,
+       COALESCE(AVG(avg_latency_ms * total_requests) / NULLIF(SUM(total_requests), 0), 0)::float AS latency_ms,
+       SUM(cache_hit_count)::bigint AS cache_hits
+     FROM analytics
+     WHERE bucket_minute >= $1
+     GROUP BY bucket_minute
+     ORDER BY bucket_minute ASC`,
+    [sinceIso],
   );
-  const buckets = [];
-  const now = new Date();
-  now.setSeconds(0, 0);
-  const byBucket = new Map(rows.map((r) => [new Date(r.bucket).getTime(), r]));
-  for (let i = minutes - 1; i >= 0; i--) {
-    const t = new Date(now.getTime() - i * 60 * 1000);
-    const r = byBucket.get(t.getTime());
-    buckets.push({
-      bucket: t.toISOString(),
-      label: t.toISOString().slice(11, 16),
-      requests: r ? Number(r.requests) : 0,
-      errors: r ? Number(r.errors) : 0,
-      avgLatencyMs: r ? Number(r.avg_latency_ms) : 0,
-    });
-  }
-  return buckets;
 }
 
 async function topRoutes({ since } = {}) {
@@ -266,7 +299,6 @@ async function trafficHeatmap({ days = 7 } = {}) {
 }
 
 async function activeRequests() {
-  // Approximate: count of requests logged in the last 5 seconds
   const r = await queryOne(
     `SELECT COUNT(*)::int AS count FROM request_logs WHERE created_at >= NOW() - INTERVAL '5 seconds'`,
     [],
@@ -285,6 +317,7 @@ async function requestsPerSecond({ windowSec = 60 } = {}) {
 
 module.exports = {
   record,
+  flush,
   overview,
   liveGraph,
   topRoutes,

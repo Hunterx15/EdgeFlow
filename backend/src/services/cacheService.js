@@ -58,10 +58,6 @@ async function set(key, value, ttlSeconds) {
     // in BOTH real-Redis mode and fallback mode (otherwise the fallback
     // receives `{ EX: secs }` as ttl, computes NaN for expiresAt, and items
     // never expire, leaking memory indefinitely).
-    logger.info("CACHE SET", {
-      key,
-      ttlSeconds,
-    });
     if (redis.isFallback()) {
       // In-memory fallback: pass ttl as a number.
       await c.set(key, JSON.stringify(value), ttlSeconds);
@@ -69,9 +65,6 @@ async function set(key, value, ttlSeconds) {
       // Real Redis: use the EX option.
       await c.set(key, JSON.stringify(value), { EX: ttlSeconds });
     }
-    logger.info("CACHE SET SUCCESS", {
-      key,
-    });
     return true;
   } catch (err) {
     logger.warn("cache: set failed", {

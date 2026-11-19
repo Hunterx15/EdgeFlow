@@ -19,8 +19,10 @@
 
 const httpProxy = require("http-proxy");
 const { URL } = require("url");
+const { Readable } = require("stream");
 
 const routeCache = require("./routeCache");
+const serviceCache = require("./serviceCache");
 const pathRewriter = require("./pathRewriter");
 const loadBalancer = require("./loadBalancer");
 const circuitBreaker = require("../services/circuitBreaker");
@@ -29,6 +31,7 @@ const rateLimiter = require("../services/rateLimiterService");
 const servicesService = require("../services/servicesService");
 const apiKeysService = require("../services/apiKeysService");
 const analyticsService = require("../services/analyticsService");
+const logBatcher = require("../services/logBatcher");
 const config = require("../config");
 const logger = require("../utils/logger");
 const jwt = require("../utils/jwt");
@@ -271,6 +274,47 @@ proxy.on("proxyRes", (proxyRes, req, res) => {
   });
 });
 
+function readRequestBody(req, maxBytes = 10 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (req.method === "GET" || req.method === "HEAD") {
+      return resolve(null);
+    }
+    if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+      return resolve(Buffer.from(JSON.stringify(req.body)));
+    }
+    if (req.readableEnded) {
+      return resolve(null);
+    }
+    const chunks = [];
+    let bytes = 0;
+    const onData = (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        cleanup();
+        reject(new Error("PAYLOAD_TOO_LARGE"));
+      } else {
+        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      }
+    };
+    const onEnd = () => {
+      cleanup();
+      resolve(chunks.length > 0 ? Buffer.concat(chunks) : null);
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    const cleanup = () => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+    };
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+  });
+}
+
 function stage(name, fn) {
   // Helper that runs fn() and returns { name, ok, durationMs, result, error }
   return (async () => {
@@ -348,10 +392,15 @@ async function proxyMiddleware(req, res, next) {
     route = s1.result;
     if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 1 done", { path: route.public_path, serviceId: route.service_id });
 
-    // Stage 2: load service
-    const s2 = await stage("Service Load", () =>
-      servicesService.getById(route.service_id),
-    );
+    // Stage 2: load service (via in-memory serviceCache with DB fallback)
+    const s2 = await stage("Service Load", async () => {
+      let svc = await serviceCache.get(route.service_id);
+      if (!svc) {
+        svc = await servicesService.getById(route.service_id);
+        if (svc) serviceCache.set(svc);
+      }
+      return svc;
+    });
     if (process.env.DEBUG_PROXY) logger.debug("proxy: Stage 2 Service Load", { ok: s2.ok, name: s2.result?.name, error: s2.error });
     pipelineStages.push(s2);
     if (!s2.ok || !s2.result || !s2.result.enabled) {
@@ -621,7 +670,7 @@ async function proxyMiddleware(req, res, next) {
       delete req.headers.authorization;
     }
 
-    // Stage 9: forward via http-proxy with retry-once
+    // Stage 9: forward via http-proxy with retry-once and upstream failover
     //
     // selfHandleResponse is true, so the proxyRes handler (registered above)
     // is responsible for writing the upstream response to `res` and for
@@ -632,13 +681,29 @@ async function proxyMiddleware(req, res, next) {
     const maxAttempts = 1 + config.gateway.maxRetries;
     const forwardStart = process.hrtime.bigint();
 
+    // Buffer request body for non-GET/HEAD so retries can replay the stream intact
+    let reqBodyBuffer = null;
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      try {
+        reqBodyBuffer = await readRequestBody(req);
+      } catch (err) {
+        return res.status(413).json({
+          success: false,
+          error: { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds size limit" },
+        });
+      }
+    }
+
+    let currentTarget = target;
+    let currentTargetBaseUrl = `${new URL(currentTarget.url).protocol}//${new URL(currentTarget.url).host}`;
+
     // Per-request context for the shared proxyRes handler.
     // This carries cacheKey, cacheTtl, and the target URL so the handler
     // knows what to cache and which circuit breaker to update.
     req._proxyContext = {
       cacheKey, // null if route is not cacheable
       cacheTtl: route.cache_ttl_sec,
-      targetUrl: target.url,
+      targetUrl: currentTarget.url,
       responseStatus: null, // filled by proxyRes handler
       responseSize: 0, // filled by proxyRes handler
       responseSent: false, // filled by proxyRes handler
@@ -675,7 +740,15 @@ async function proxyMiddleware(req, res, next) {
           res.once("finish", onFinish);
           res.once("error", onError);
 
-          proxy.web(req, res, { target: targetBaseUrl }, (err) => {
+          const proxyOpts = { target: currentTargetBaseUrl };
+          if (reqBodyBuffer) {
+            const bufferStream = new Readable();
+            bufferStream.push(reqBodyBuffer);
+            bufferStream.push(null);
+            proxyOpts.buffer = bufferStream;
+          }
+
+          proxy.web(req, res, proxyOpts, (err) => {
             if (process.env.DEBUG_PROXY) logger.debug("proxy: proxy.web callback", { error: err?.message });
             if (err) {
               // Connection-level error (before any response was received).
@@ -683,12 +756,25 @@ async function proxyMiddleware(req, res, next) {
               cleanup();
               logger.warn("proxy: forward failed", {
                 error: err.message,
-                target: target.url,
+                target: currentTarget.url,
                 attempt: attempts,
               });
-              circuitBreaker.recordFailure(target.url);
+              circuitBreaker.recordFailure(currentTarget.url);
               if (!res.headersSent) {
                 if (attempts < maxAttempts) {
+                  // Failover: pick the next healthy target from the load balancer
+                  const failoverTarget = loadBalancer.nextTarget(service);
+                  if (failoverTarget) {
+                    currentTarget = failoverTarget;
+                    const urlObj = new URL(currentTarget.url);
+                    currentTargetBaseUrl = `${urlObj.protocol}//${urlObj.host}`;
+                    req.headers["x-edgeflow-upstream"] = currentTarget.url;
+                    req._proxyContext.targetUrl = currentTarget.url;
+                    logger.info("proxy: retrying failover to alternate upstream", {
+                      target: currentTarget.url,
+                      attempt: attempts + 1,
+                    });
+                  }
                   // Schedule retry — resolve so the while-loop continues.
                   setTimeout(() => resolve(), config.gateway.retryDelayMs);
                 } else {
@@ -730,7 +816,7 @@ async function proxyMiddleware(req, res, next) {
         req,
         route,
         service,
-        target.url,
+        currentTarget.url,
         502,
         latencyMs,
         0,
@@ -751,8 +837,8 @@ async function proxyMiddleware(req, res, next) {
     }
 
     // Circuit-breaker bookkeeping based on response status
-    if (responseStatus >= 500) circuitBreaker.recordFailure(target.url);
-    else if (responseStatus) circuitBreaker.recordSuccess(target.url);
+    if (responseStatus >= 500) circuitBreaker.recordFailure(currentTarget.url);
+    else if (responseStatus) circuitBreaker.recordSuccess(currentTarget.url);
 
     const latencyMs = latencyMsFrom(startedAt);
     pipelineStages.push({
@@ -765,7 +851,7 @@ async function proxyMiddleware(req, res, next) {
       req,
       route,
       service,
-      target.url,
+      currentTarget.url,
       responseStatus || 200,
       latencyMs,
       responseSize,
@@ -855,38 +941,13 @@ function recordLog(
         )
       : null,
   };
-  Promise.all([
-    queryRaw(
-      `INSERT INTO request_logs (request_id, method, public_path, service_id, route_id, api_key_id,
-         upstream_url, status_code, latency_ms, response_size, error, client_ip, user_agent,
-         cache_hit, retry_count, pipeline_stages)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb)`,
-      [
-        payload.requestId,
-        payload.method,
-        payload.publicPath,
-        payload.serviceId,
-        payload.routeId,
-        payload.apiKeyId,
-        payload.upstreamUrl,
-        payload.statusCode,
-        payload.latencyMs,
-        payload.responseSize,
-        payload.error,
-        payload.clientIp,
-        payload.userAgent,
-        payload.cacheHit,
-        payload.retryCount,
-        payload.pipelineStages,
-      ],
-    ).catch((e) => logger.warn("log insert failed", { error: e.message })),
-    analyticsService.record({
-      serviceId: payload.serviceId,
-      statusCode: payload.statusCode,
-      latencyMs: payload.latencyMs,
-      cacheHit: payload.cacheHit,
-    }),
-  ]).catch(() => {});
+  logBatcher.enqueue(payload);
+  analyticsService.record({
+    serviceId: payload.serviceId,
+    statusCode: payload.statusCode,
+    latencyMs: payload.latencyMs,
+    cacheHit: payload.cacheHit,
+  });
 }
 
 module.exports = { proxyMiddleware, proxy };

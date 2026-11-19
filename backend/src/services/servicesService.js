@@ -68,6 +68,7 @@ async function create(input) {
   );
   // Emit event — healthScheduler and routeCache subscribe and react.
   eventBus.emit(eventBus.EVENTS.SERVICE_CREATED, svc);
+  try { require('../gateway/serviceCache').set(svc); } catch (_) {}
   return svc;
 }
 
@@ -99,6 +100,7 @@ async function update(id, patch) {
   values.push(id);
   const updated = await queryOne(`UPDATE services SET ${sets.join(', ')} WHERE id = $${i} RETURNING ${COLS}`, values);
   eventBus.emit(eventBus.EVENTS.SERVICE_UPDATED, updated);
+  try { require('../gateway/serviceCache').set(updated); } catch (_) {}
   return updated;
 }
 
@@ -106,6 +108,7 @@ async function setEnabled(id, enabled) {
   const updated = await queryOne(`UPDATE services SET enabled = $1 WHERE id = $2 RETURNING ${COLS}`, [enabled, id]);
   if (!updated) throw new NotFoundError('Service');
   eventBus.emit(eventBus.EVENTS.SERVICE_TOGGLED, updated);
+  try { require('../gateway/serviceCache').set(updated); } catch (_) {}
   return updated;
 }
 
@@ -122,6 +125,9 @@ async function updateHeartbeat(id, status, targetHealthMap = null) {
   if (!result) {
     result = await queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1 WHERE id = $2 RETURNING ${COLS}`, [status, id]);
   }
+  if (result) {
+    try { require('../gateway/serviceCache').set(result); } catch (_) {}
+  }
   // Emit health check event — monitoringService can subscribe if needed.
   eventBus.emit(eventBus.EVENTS.HEALTH_CHECKED, { id, status, targetHealthMap });
   return result;
@@ -129,6 +135,7 @@ async function updateHeartbeat(id, status, targetHealthMap = null) {
 
 async function remove(id) {
   const service = await getById(id);
+  try { require('../gateway/serviceCache').invalidate(id); } catch (_) {}
   await queryRaw('DELETE FROM services WHERE id = $1', [id]);
   // Include upstream_targets in the event so circuitBreaker can clean up
   // its state for the deleted upstreams.
