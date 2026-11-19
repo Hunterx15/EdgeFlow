@@ -2,17 +2,63 @@
  * EdgeFlow - Routes service
  *
  * CRUD for dynamic routes. After mutations, invalidates route cache.
+ *
+ * ARCHITECTURAL INVARIANT (enforced by normalizePublicPath):
+ *   Routes are stored in the database WITHOUT the gateway prefix.
+ *   The gateway prefix (e.g. "/gateway") is a mount-point concern —
+ *   it's where Express mounts the proxy via app.use(gatewayPrefix, proxyMiddleware).
+ *   The public_path column represents the logical path WITHIN the gateway's
+ *   route space. The proxy strips the gateway prefix from the incoming URL
+ *   BEFORE looking up the route, so the lookup key never contains the prefix.
+ *
+ *   This means:
+ *     - A request to /gateway/xcode/health becomes a lookup for /xcode/health
+ *     - The route's public_path must be /xcode/health (NOT /gateway/xcode/health)
+ *
+ *   normalizePublicPath() enforces this invariant on every create and update,
+ *   so even if the user types /gateway/xcode/health in the dashboard, the
+ *   service stores /xcode/health. This keeps the DB data consistent with the
+ *   proxy's lookup logic regardless of what the client sends.
  */
 
 const { queryOne, queryMany, queryRaw } = require('../database/pool');
 const { NotFoundError, ConflictError, ValidationError } = require('../utils/http');
 const servicesService = require('./servicesService');
+const config = require('../config');
 
 const COLS = `id, service_id, method, public_path, upstream_path, strip_prefix,
   auth_required, api_key_required, rate_limit_per_min, cache_ttl_sec,
   description, enabled, created_at, updated_at`;
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'];
+
+/**
+ * Strip the gateway prefix from a public path if present.
+ *
+ * Users frequently type "/gateway/xcode/health" in the dashboard because the
+ * gateway prefix is part of the URL they see in the browser. But the proxy
+ * strips the prefix before lookup, so the stored public_path must NOT include
+ * it. This function normalizes the input so the DB always stores the
+ * prefix-free form.
+ *
+ * Examples (gatewayPrefix = "/gateway"):
+ *   "/gateway/xcode/health"  → "/xcode/health"
+ *   "/gateway/xcode/*"       → "/xcode/*"
+ *   "/xcode/health"          → "/xcode/health"  (no change)
+ *   "/"                      → "/"              (no change)
+ */
+function normalizePublicPath(publicPath) {
+  if (!publicPath || typeof publicPath !== 'string') return publicPath;
+  const prefix = config.server.gatewayPrefix;
+  let normalized = publicPath;
+  if (prefix && normalized.startsWith(prefix)) {
+    normalized = normalized.slice(prefix.length);
+  }
+  if (!normalized.startsWith('/')) {
+    normalized = '/' + normalized;
+  }
+  return normalized;
+}
 
 async function getById(id) {
   const r = await queryOne(`SELECT ${COLS} FROM routes WHERE id = $1`, [id]);
@@ -29,6 +75,9 @@ async function list({ limit = 100, offset = 0, serviceId = null } = {}) {
 
 async function create(input) {
   validateMethod(input.method);
+  // Normalize the public path BEFORE validation and storage so the
+  // gateway prefix is never persisted.
+  input.publicPath = normalizePublicPath(input.publicPath);
   validatePaths(input.publicPath, input.upstreamPath);
   const svc = await servicesService.getById(input.serviceId);
   if (!svc) throw new NotFoundError('Service');
@@ -49,7 +98,11 @@ async function create(input) {
 async function update(id, patch) {
   const existing = await getById(id);
   if (patch.method) validateMethod(patch.method);
-  if (patch.public_path) validatePaths(patch.public_path, existing.upstream_path);
+  // Normalize the public path if it's being updated — same invariant as create.
+  if (patch.public_path) {
+    patch.public_path = normalizePublicPath(patch.public_path);
+    validatePaths(patch.public_path, existing.upstream_path);
+  }
   if (patch.upstream_path) validatePaths(existing.public_path, patch.upstream_path);
   if (patch.method) patch.method = patch.method.toUpperCase();
 
@@ -114,4 +167,4 @@ function validatePaths(publicPath, upstreamPath) {
   if (!upstreamPath || !upstreamPath.startsWith('/')) throw new ValidationError('upstreamPath must start with /');
 }
 
-module.exports = { getById, list, create, update, setEnabled, remove, findByPublicPath, listAllEnabled, METHODS };
+module.exports = { getById, list, create, update, setEnabled, remove, findByPublicPath, listAllEnabled, normalizePublicPath, METHODS };

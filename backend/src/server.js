@@ -21,9 +21,13 @@ const { migrate } = require('./database/migrations');
 const db = require('./database/pool');
 const redis = require('./database/redis');
 const routeCache = require('./gateway/routeCache');
+const serviceCache = require('./gateway/serviceCache');
 const healthScheduler = require('./services/healthScheduler');
 const circuitBreaker = require('./services/circuitBreaker');
 const authService = require('./services/authService');
+const logBatcher = require('./services/logBatcher');
+const analyticsService = require('./services/analyticsService');
+const apiKeysService = require('./services/apiKeysService');
 const { queryOne } = require('./database/pool');
 const { createApp } = require('./app');
 
@@ -39,9 +43,13 @@ async function boot() {
 
   await circuitBreaker.loadPersistedState();
   circuitBreaker.configure(config.gateway.circuitBreaker);
+  await circuitBreaker.initSubscriber();
 
   await routeCache.warm();
   logger.info('server: route cache warmed', { routes: routeCache.size() });
+
+  await serviceCache.warm();
+  logger.info('server: service cache warmed', { services: serviceCache.size() });
 
   await seedAdminIfMissing();
   await healthScheduler.reconcile();
@@ -65,7 +73,19 @@ async function boot() {
     logger.info(`server: received ${signal}, shutting down gracefully`);
     healthScheduler.stopAll();
     server.close(() => logger.info('server: http closed'));
-    try { await db.close(); await redis.close(); } catch (err) { logger.error('server: shutdown error', { error: err.message }); }
+    try {
+      logger.info('server: flushing pending logs, metrics, and key usage...');
+      await Promise.allSettled([
+        logBatcher.flush(),
+        analyticsService.flush(),
+        apiKeysService.flushUsage(),
+      ]);
+      await circuitBreaker.close();
+      await db.close();
+      await redis.close();
+    } catch (err) {
+      logger.error('server: shutdown error', { error: err.message });
+    }
     process.exit(0);
   };
 

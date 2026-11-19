@@ -56,6 +56,7 @@ async function create(input) {
       input.healthCheckIntervalMs || 30000, JSON.stringify(input.metadata || {})]
   );
   healthScheduler.schedule(svc);
+  try { require('../gateway/serviceCache').set(svc); } catch (_) {}
   return svc;
 }
 
@@ -88,6 +89,7 @@ async function update(id, patch) {
   const updated = await queryOne(`UPDATE services SET ${sets.join(', ')} WHERE id = $${i} RETURNING ${COLS}`, values);
   routeCache.invalidate();
   healthScheduler.reschedule(updated);
+  try { require('../gateway/serviceCache').set(updated); } catch (_) {}
   return updated;
 }
 
@@ -97,24 +99,33 @@ async function setEnabled(id, enabled) {
   routeCache.invalidate();
   if (!enabled) healthScheduler.unschedule(id);
   else healthScheduler.reschedule(updated);
+  try { require('../gateway/serviceCache').set(updated); } catch (_) {}
   return updated;
 }
 
 async function updateHeartbeat(id, status, targetHealthMap = null) {
+  let result;
   if (targetHealthMap) {
     const svc = await getById(id);
     if (svc) {
       const updated = svc.upstream_targets.map((t) => ({ ...t, healthy: targetHealthMap[t.url] ?? t.healthy }));
-      return queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1, upstream_targets = $2 WHERE id = $3 RETURNING ${COLS}`,
+      result = await queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1, upstream_targets = $2 WHERE id = $3 RETURNING ${COLS}`,
         [status, JSON.stringify(updated), id]);
     }
   }
-  return queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1 WHERE id = $2 RETURNING ${COLS}`, [status, id]);
+  if (!result) {
+    result = await queryOne(`UPDATE services SET last_heartbeat_at = NOW(), last_status = $1 WHERE id = $2 RETURNING ${COLS}`, [status, id]);
+  }
+  if (result) {
+    try { require('../gateway/serviceCache').set(result); } catch (_) {}
+  }
+  return result;
 }
 
 async function remove(id) {
   await getById(id);
   healthScheduler.unschedule(id);
+  try { require('../gateway/serviceCache').invalidate(id); } catch (_) {}
   await queryRaw('DELETE FROM services WHERE id = $1', [id]);
   routeCache.invalidate();
   return true;

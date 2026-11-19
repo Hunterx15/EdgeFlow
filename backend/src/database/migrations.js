@@ -137,11 +137,13 @@ const migrations = [
         BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
         $$ LANGUAGE plpgsql;
 
-        CREATE OR REPLACE FUNCTION gen_random_uuid() RETURNS UUID AS $$
-        BEGIN
-          RETURN encode(gen_random_bytes(16), 'hex')::uuid;
-        END;
-        $$ LANGUAGE plpgsql;
+        -- BUG FIX: do NOT redefine gen_random_uuid(). PostgreSQL 13+ ships
+        -- it natively, and older versions get it from the pgcrypto extension.
+        -- The previous custom definition tried to call gen_random_bytes()
+        -- which only exists in pgcrypto, so on PG 13+ (where gen_random_uuid
+        -- is native) this would either shadow the native function with a
+        -- broken one, or fail outright on PG <13 without pgcrypto enabled.
+        -- The native function is correct; we rely on it.
       `);
 
       // Add updated_at triggers
@@ -152,6 +154,66 @@ const migrations = [
             FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
         `);
       }
+    },
+  },
+  {
+    // ────────────────────────────────────────────────────────────────
+    // Migration 0002: Strip the gateway prefix from existing route
+    // public_path values.
+    //
+    // ROOT CAUSE BACKGROUND:
+    //   The proxy strips the gateway prefix (e.g. "/gateway") from the
+    //   incoming URL BEFORE looking up the route in the cache. This means
+    //   the cache key is "GET:/xcode/health" (no prefix). But many routes
+    //   were created via the dashboard with the prefix INCLUDED in
+    //   public_path (e.g. "/gateway/xcode/health"), because:
+    //     a) The frontend's default placeholder was "/gateway/users/*"
+    //     b) No validation stripped or rejected the prefix
+    //
+    //   Result: cache key = "GET:/gateway/xcode/health" but lookup key =
+    //   "GET:/xcode/health" → no match → 404 ROUTE_NOT_FOUND on every
+    //   proxied request.
+    //
+    //   This migration fixes existing DB data by stripping the gateway
+    //   prefix from all public_path values. New routes are normalized by
+    //   routesService.normalizePublicPath() on create/update, so they
+    //   never contain the prefix going forward.
+    //
+    //   The gateway prefix is read from the GATEWAY_PREFIX env var
+    //   (default "/gateway") at migration time. If the env var isn't set,
+    //   the default is used.
+    // ────────────────────────────────────────────────────────────────
+    name: '0002_strip_gateway_prefix_from_routes',
+    up: async (client) => {
+      const gatewayPrefix = process.env.GATEWAY_PREFIX || '/gateway';
+      // Strip the prefix from any public_path that starts with it.
+      // Use a single UPDATE with a WHERE clause so it's atomic and fast.
+      // The `|| '/'` fallback handles the edge case where a route was
+      // literally just "/gateway" (becomes "/" after stripping).
+      const result = await client.query(
+        `UPDATE routes
+         SET public_path = CASE
+           WHEN public_path = $1 THEN '/'
+           WHEN public_path LIKE $1 || '/%' THEN SUBSTRING(public_path FROM LENGTH($1) + 1)
+           ELSE public_path
+         END
+         WHERE public_path = $1 OR public_path LIKE $1 || '/%'`,
+        [gatewayPrefix]
+      );
+      // Log how many rows were fixed. Use console.log (not the structured
+      // logger) because the logger may not be fully initialized at migration
+      // time, and this is a one-time data-fix message.
+      if (result.rowCount && result.rowCount > 0) {
+        console.log(`[migration 0002] stripped "${gatewayPrefix}" prefix from ${result.rowCount} route(s)`);
+      }
+    },
+  },
+  {
+    name: '0003_multi_session_refresh_tokens',
+    up: async (client) => {
+      await client.query(`
+        ALTER TABLE users ALTER COLUMN refresh_token_jti TYPE TEXT;
+      `);
     },
   },
 ];

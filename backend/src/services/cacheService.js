@@ -31,11 +31,19 @@ async function set(key, value, ttlSeconds) {
   try {
     const c = await redis.getClient();
 
-    await c.set(
-      key,
-      JSON.stringify(value),
-      { EX: ttlSeconds }
-    );
+    // node-redis v4+ accepts an options object: c.set(k, v, { EX: secs }).
+    // Our MemoryFallback's set() signature is set(k, v, ttl) where ttl is a
+    // number. Detect the client type and call accordingly so caching works
+    // in BOTH real-Redis mode and fallback mode (otherwise the fallback
+    // receives `{ EX: secs }` as ttl, computes NaN for expiresAt, and items
+    // never expire, leaking memory indefinitely).
+    if (redis.isFallback()) {
+      // In-memory fallback: pass ttl as a number.
+      await c.set(key, JSON.stringify(value), ttlSeconds);
+    } else {
+      // Real Redis: use the EX option.
+      await c.set(key, JSON.stringify(value), { EX: ttlSeconds });
+    }
 
     return true;
   } catch (err) {

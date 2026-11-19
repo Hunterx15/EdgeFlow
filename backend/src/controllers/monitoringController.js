@@ -46,10 +46,9 @@ async function circuitBreakers(_req, res, next) {
 
 async function resetCircuit(req, res, next) {
   try {
-    const upstreamUrl = req.params.upstreamUrl || req.body?.upstreamUrl;
+    const upstreamUrl = req.body?.upstreamUrl || req.query?.upstreamUrl;
     if (upstreamUrl) {
-      const s = circuitBreaker.getState(upstreamUrl);
-      s.state = 'closed'; s.failureCount = 0; s.successCount = 0; s.halfOpenInflight = 0;
+      circuitBreaker.reset(upstreamUrl);
     }
     return ok(res, { reset: true, upstreamUrl });
   } catch (err) { next(err); }

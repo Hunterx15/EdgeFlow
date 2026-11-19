@@ -14,7 +14,12 @@ import { useToast } from '../utils/toast';
 import { classNames } from '../utils/format';
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'];
-const emptyForm = { serviceId: '', method: 'GET', publicPath: '/gateway/users/*', upstreamPath: '/api/users', stripPrefix: true, authRequired: true, apiKeyRequired: false, rateLimitPerMin: 100, cacheTtlSec: 0, description: '', enabled: true };
+// NOTE: publicPath must NOT include the /gateway prefix. The gateway prefix
+// is a mount-point concern — the proxy strips it before route lookup. Routes
+// are stored and matched by their prefix-free logical path (e.g. "/users/*",
+// not "/gateway/users/*"). The service normalizes this automatically, but the
+// placeholder guides users to the correct format.
+const emptyForm = { serviceId: '', method: 'GET', publicPath: '/users/*', upstreamPath: '/api/users', stripPrefix: true, authRequired: true, apiKeyRequired: false, rateLimitPerMin: 100, cacheTtlSec: 0, description: '', enabled: true };
 
 export default function RoutesPage() {
   const [items, setItems] = useState([]);
@@ -53,7 +58,7 @@ export default function RoutesPage() {
 
       <Card noPadding>
         {loading ? <TableSkeleton rows={6} cols={6} /> : items.length === 0 ? (
-          <EmptyState icon={RouteIcon} title="No routes registered" description="Routes bind a public path (e.g. /gateway/users/*) to a backend service + upstream path."
+          <EmptyState icon={RouteIcon} title="No routes registered" description="Routes bind a public path (e.g. /users/*) to a backend service + upstream path. Do not include the /gateway prefix — the proxy strips it automatically."
             action={<button onClick={() => { setEditing(null); setModalOpen(true); }} className="btn-primary"><Plus size={16} /> Register Route</button>} />
         ) : (
           <div className="overflow-x-auto">
@@ -146,7 +151,7 @@ function RouteFormModal({ open, editing, services, onClose, onSaved }) {
           <div><label className="label">HTTP Method</label><select className="input" {...register('method')}>{METHODS.map((m) => <option key={m} value={m}>{m}</option>)}</select></div>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <div><label className="label">Public Path</label><input className="input font-mono" {...register('publicPath', { required: true })} placeholder="/gateway/users/*" /></div>
+          <div><label className="label">Public Path</label><input className="input font-mono" {...register('publicPath', { required: true })} placeholder="/users/*  (without /gateway prefix)" /></div>
           <div><label className="label">Upstream Path</label><input className="input font-mono" {...register('upstreamPath', { required: true })} placeholder="/api/users" /></div>
         </div>
         <div><label className="label">Description</label><input className="input" {...register('description')} placeholder="What does this route do?" /></div>

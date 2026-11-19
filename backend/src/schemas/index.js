@@ -84,16 +84,29 @@ const routeCreateSchema = (b) => {
 const routeUpdateSchema = (b) => {
   const out = {};
   if (b.method !== undefined) out.method = b.method.toUpperCase();
-  if (b.publicPath !== undefined) {
-    if (!isString(b.publicPath, { max: 255 }) || !b.publicPath.startsWith('/')) throw new ValidationError('publicPath must start with /');
-    out.public_path = b.publicPath;
+  // Accept BOTH camelCase and snake_case from the client. The frontend
+  // sends camelCase (via react-hook-form), but API clients (curl, Postman,
+  // other services) may send snake_case to match the DB column names.
+  // Without this, a snake_case update payload is silently dropped — the
+  // service sees an empty patch, returns the existing row unchanged, and
+  // the user's edit appears to "not persist."
+  const publicPath = b.publicPath !== undefined ? b.publicPath : b.public_path;
+  if (publicPath !== undefined) {
+    if (!isString(publicPath, { max: 255 }) || !publicPath.startsWith('/')) throw new ValidationError('publicPath must start with /');
+    out.public_path = publicPath;
   }
-  if (b.upstreamPath !== undefined) out.upstream_path = b.upstreamPath;
-  if (b.stripPrefix !== undefined) out.strip_prefix = b.stripPrefix;
-  if (b.authRequired !== undefined) out.auth_required = b.authRequired;
-  if (b.apiKeyRequired !== undefined) out.api_key_required = b.apiKeyRequired;
-  if (b.rateLimitPerMin !== undefined) out.rate_limit_per_min = b.rateLimitPerMin;
-  if (b.cacheTtlSec !== undefined) out.cache_ttl_sec = b.cacheTtlSec;
+  const upstreamPath = b.upstreamPath !== undefined ? b.upstreamPath : b.upstream_path;
+  if (upstreamPath !== undefined) out.upstream_path = upstreamPath;
+  const stripPrefix = b.stripPrefix !== undefined ? b.stripPrefix : b.strip_prefix;
+  if (stripPrefix !== undefined) out.strip_prefix = stripPrefix;
+  const authRequired = b.authRequired !== undefined ? b.authRequired : b.auth_required;
+  if (authRequired !== undefined) out.auth_required = authRequired;
+  const apiKeyRequired = b.apiKeyRequired !== undefined ? b.apiKeyRequired : b.api_key_required;
+  if (apiKeyRequired !== undefined) out.api_key_required = apiKeyRequired;
+  const rateLimitPerMin = b.rateLimitPerMin !== undefined ? b.rateLimitPerMin : b.rate_limit_per_min;
+  if (rateLimitPerMin !== undefined) out.rate_limit_per_min = rateLimitPerMin;
+  const cacheTtlSec = b.cacheTtlSec !== undefined ? b.cacheTtlSec : b.cache_ttl_sec;
+  if (cacheTtlSec !== undefined) out.cache_ttl_sec = cacheTtlSec;
   if (b.description !== undefined) out.description = b.description;
   if (b.enabled !== undefined) out.enabled = b.enabled;
   return out;

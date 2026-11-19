@@ -17,6 +17,10 @@ router.post('/cache/flush', requireAuth, requireRole('admin'), asyncHandler(cont
 router.post('/cache/invalidate', requireAuth, requireRole('admin'), asyncHandler(controller.cacheInvalidate));
 
 router.get('/circuit-breakers', requireAuth, asyncHandler(controller.circuitBreakers));
-router.post('/circuit-breakers/:upstreamUrl/reset', requireAuth, requireRole('admin'), asyncHandler(controller.resetCircuit));
+// BUG FIX: previously this used `:upstreamUrl` as a path parameter, but
+// upstream URLs (e.g. http://user-svc:3001) contain `/` which makes path
+// matching impossible. The upstream URL is now passed in the request body
+// or query string instead. Supports both for convenience.
+router.post('/circuit-breakers/reset', requireAuth, requireRole('admin'), asyncHandler(controller.resetCircuit));
 
 module.exports = router;

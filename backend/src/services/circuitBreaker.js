@@ -14,6 +14,8 @@
  */
 
 const { queryOne, queryRaw } = require('../database/pool');
+const redis = require('../database/redis');
+const config = require('../config');
 const logger = require('../utils/logger');
 
 const cfg = { failureThreshold: 5, successThreshold: 2, openStateMs: 30000, halfOpenMaxCalls: 3 };
@@ -115,6 +117,61 @@ async function persistAsync(upstreamUrl, s) {
       [upstreamUrl, s.state, s.failureCount, s.successCount, s.state === 'open' ? new Date(s.openedAt).toISOString() : null]
     );
   } catch (err) { logger.warn('circuit: persist failed', { error: err.message, upstreamUrl }); }
+
+  // Broadcast state change across replicas via Redis Pub/Sub
+  try {
+    const c = await redis.getClient();
+    if (typeof c.publish === 'function') {
+      await c.publish('ef:circuit:events', JSON.stringify({
+        upstreamUrl,
+        state: s.state,
+        openedAt: s.openedAt,
+        failureCount: s.failureCount,
+        successCount: s.successCount,
+      }));
+    }
+  } catch (_) {}
+}
+
+let subClient = null;
+
+async function initSubscriber() {
+  if (!config.redis.enabled) return;
+  try {
+    const { createClient } = require('redis');
+    subClient = createClient({
+      url: config.redis.url,
+      socket: { reconnectStrategy: (r) => r > 10 ? new Error('REDIS_MAX_RETRIES') : Math.min(r * 200, 2000) },
+    });
+    subClient.on('error', () => {});
+    await subClient.connect();
+    await subClient.subscribe('ef:circuit:events', (message) => {
+      try {
+        const event = JSON.parse(message);
+        if (!event.upstreamUrl || !event.state) return;
+        const current = get(event.upstreamUrl);
+        current.state = event.state;
+        if (event.state === 'open') {
+          current.openedAt = event.openedAt || Date.now();
+          current.halfOpenInflight = 0;
+        } else if (event.state === 'closed') {
+          current.failureCount = 0;
+          current.successCount = 0;
+        }
+        logger.debug('circuit: synced remote state transition', { upstreamUrl: event.upstreamUrl, state: event.state });
+      } catch (_) {}
+    });
+    logger.info('circuit: subscribed to distributed state events');
+  } catch (err) {
+    logger.debug('circuit: pub/sub not initialized (running standalone breaker)', { error: err.message });
+  }
+}
+
+async function close() {
+  if (subClient && subClient.isOpen) {
+    try { await subClient.quit(); } catch (_) {}
+    subClient = null;
+  }
 }
 
 async function loadPersistedState() {
@@ -132,8 +189,32 @@ async function loadPersistedState() {
   } catch (err) { logger.warn('circuit: failed to load persisted state', { error: err.message }); }
 }
 
+function reset(upstreamUrl) {
+  const s = get(upstreamUrl);
+  s.state = 'closed';
+  s.failureCount = 0;
+  s.successCount = 0;
+  s.openedAt = 0;
+  s.halfOpenInflight = 0;
+  s.lastTransitionAt = nowMs();
+  persistAsync(upstreamUrl, s);
+  return s;
+}
+
 function configure(opts) { Object.assign(cfg, opts); }
 function getState(upstreamUrl) { return get(upstreamUrl); }
 function listAll() { return Array.from(state.entries()).map(([url, s]) => ({ upstreamUrl: url, ...s })); }
 
-module.exports = { allowRequest, recordSuccess, recordFailure, withBreaker, loadPersistedState, configure, getState, listAll };
+module.exports = {
+  allowRequest,
+  recordSuccess,
+  recordFailure,
+  reset,
+  withBreaker,
+  loadPersistedState,
+  initSubscriber,
+  close,
+  configure,
+  getState,
+  listAll,
+};

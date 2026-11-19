@@ -4,10 +4,11 @@
  * Talks to PostgreSQL directly (no repository layer per the simpler
  * architecture requirement). Handles login / refresh / logout / me.
  *
- * Token rotation: on every refresh we issue a new refresh token AND
- * invalidate the previous one (by updating refresh_token_jti). Detects
- * replay attacks: if a stolen refresh token is replayed after the
- * legitimate user refreshed, the jti won't match -> 401 + revoke.
+ * Multi-Device Token Rotation:
+ * On every refresh we issue a new refresh token and rotate ONLY the
+ * matching session JTI in users.refresh_token_jti (supports up to 5 concurrent
+ * devices). If an unknown or already-rotated JTI is replayed, it detects
+ * a replay attack and revokes all sessions for that user.
  */
 
 const { queryOne, queryRaw } = require('../database/pool');
@@ -17,6 +18,22 @@ const { UnauthorizedError, ConflictError, ValidationError } = require('../utils/
 const logger = require('../utils/logger');
 
 const USER_COLS = 'id, email, name, password_hash, role, is_active, last_login_at, refresh_token_jti, created_at, updated_at';
+const MAX_CONCURRENT_SESSIONS = 5;
+
+function parseJtiList(stored) {
+  if (!stored) return [];
+  try {
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (_) {}
+  // Backwards compatibility with single legacy string JTI
+  return [stored];
+}
+
+function serializeJtiList(jtis) {
+  // Keep only the most recent N sessions
+  return JSON.stringify(jtis.slice(-MAX_CONCURRENT_SESSIONS));
+}
 
 async function login({ email, password }) {
   if (!email || !password) throw new ValidationError('Email and password are required');
@@ -33,7 +50,14 @@ async function login({ email, password }) {
 
   const accessToken = jwt.signAccessToken(user);
   const { token: refreshToken, jti } = jwt.signRefreshToken(user);
-  await queryRaw('UPDATE users SET refresh_token_jti = $1, last_login_at = NOW() WHERE id = $2', [jti, user.id]);
+
+  const activeJtis = parseJtiList(user.refresh_token_jti);
+  activeJtis.push(jti);
+
+  await queryRaw('UPDATE users SET refresh_token_jti = $1, last_login_at = NOW() WHERE id = $2', [
+    serializeJtiList(activeJtis),
+    user.id,
+  ]);
   return { user: sanitize(user), accessToken, refreshToken };
 }
 
@@ -41,18 +65,43 @@ async function refresh(refreshToken) {
   const decoded = jwt.verifyRefreshToken(refreshToken);
   const user = await queryOne(`SELECT ${USER_COLS} FROM users WHERE id = $1`, [decoded.sub]);
   if (!user || !user.is_active) throw new UnauthorizedError('User not found or disabled');
-  if (user.refresh_token_jti !== decoded.jti) {
+
+  const activeJtis = parseJtiList(user.refresh_token_jti);
+  const index = activeJtis.indexOf(decoded.jti);
+  if (index === -1) {
     logger.warn('auth: refresh token jti mismatch - possible replay attack', { userId: user.id });
     await queryRaw('UPDATE users SET refresh_token_jti = NULL WHERE id = $1', [user.id]);
     throw new UnauthorizedError('Refresh token has been revoked');
   }
+
   const newAccessToken = jwt.signAccessToken(user);
   const { token: newRefreshToken, jti: newJti } = jwt.signRefreshToken(user);
-  await queryRaw('UPDATE users SET refresh_token_jti = $1 WHERE id = $2', [newJti, user.id]);
+
+  // Rotate only the matched session JTI
+  activeJtis[index] = newJti;
+  await queryRaw('UPDATE users SET refresh_token_jti = $1 WHERE id = $2', [
+    serializeJtiList(activeJtis),
+    user.id,
+  ]);
   return { user: sanitize(user), accessToken: newAccessToken, refreshToken: newRefreshToken };
 }
 
-async function logout(userId) {
+async function logout(userId, refreshToken = null) {
+  if (refreshToken) {
+    try {
+      const decoded = jwt.verifyRefreshToken(refreshToken);
+      const user = await queryOne(`SELECT refresh_token_jti FROM users WHERE id = $1`, [userId]);
+      if (user) {
+        const activeJtis = parseJtiList(user.refresh_token_jti);
+        const filtered = activeJtis.filter((j) => j !== decoded.jti);
+        await queryRaw('UPDATE users SET refresh_token_jti = $1 WHERE id = $2', [
+          filtered.length > 0 ? serializeJtiList(filtered) : null,
+          userId,
+        ]);
+        return true;
+      }
+    } catch (_) {}
+  }
   await queryRaw('UPDATE users SET refresh_token_jti = NULL WHERE id = $1', [userId]);
   return true;
 }
